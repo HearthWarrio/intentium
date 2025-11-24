@@ -151,4 +151,23 @@ public class IntentiumWebDriver {
         // fallback: просто тег
         return element.getTagName();
     }
+
+    /**
+     * Start a single-intent fluent action:
+     * intentium.into("login field").send("user");
+     */
+    public SingleIntentAction into(String intentPhrase) {
+        return new SingleIntentAction(this, intentPhrase);
+    }
+
+    /**
+     * Start a chain of actions:
+     * actionsChain()
+     *   .into("login field").send("user")
+     *   .into("password field").send("secret")
+     *   .at("login button").performClick();
+     */
+    public ActionsChain actionsChain() {
+        return new ActionsChain(this);
+    }
 }
