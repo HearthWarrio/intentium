@@ -6,50 +6,95 @@ import java.util.Objects;
 import java.util.function.Consumer;
 
 /**
- * Fluent chain API:
- *
- * actionsChain()
- *   .into("login field").send("user")
- *   .into("password field").send("secret")
- *   .at("login button").performClick();
+ * DSL for executing a sequence of intent-driven actions.
+ * <p>
+ * Supports optional overrides for logging and consistency checks at chain level.
  */
 public final class ActionsChain {
 
     private final IntentiumWebDriver intentium;
-    private final List<Consumer<IntentiumWebDriver>> steps = new ArrayList<>();
 
     private String currentIntent;
+    private final List<Consumer<IntentiumWebDriver>> steps = new ArrayList<>();
 
-    ActionsChain(IntentiumWebDriver intentium) {
+    private boolean loggerOverrideSpecified = false;
+    private ResolvedElementLogger loggerOverrideValue = null;
+
+    private Boolean consistencyOverride = null;
+
+    public ActionsChain(IntentiumWebDriver intentium) {
         this.intentium = Objects.requireNonNull(intentium, "intentium must not be null");
     }
 
     /**
-     * Set current intent for subsequent actions on a field.
+     * Overrides logger for this chain (null disables logging).
      */
-    public ActionsChain into(String intentPhrase) {
-        this.currentIntent = Objects.requireNonNull(intentPhrase, "intentPhrase must not be null");
+    public ActionsChain withLogger(ResolvedElementLogger logger) {
+        this.loggerOverrideSpecified = true;
+        this.loggerOverrideValue = logger;
         return this;
     }
 
     /**
-     * Alias for into(...) – for better readability before click.
+     * Overrides logger for this chain with a stdout implementation.
+     */
+    public ActionsChain withLoggingToStdOut(LocatorLogDetail detail) {
+        return withLogger(new StdOutResolvedElementLogger(detail));
+    }
+
+    /**
+     * Enables stdout logging of both XPath and CSS for this chain.
+     */
+    public ActionsChain logLocators() {
+        return withLoggingToStdOut(LocatorLogDetail.BOTH);
+    }
+
+    /**
+     * Disables locator logging for this chain.
+     */
+    public ActionsChain disableLocatorLogging() {
+        return withLogger(null);
+    }
+
+    /**
+     * Overrides consistency check setting for this chain.
+     */
+    public ActionsChain withConsistencyCheck(boolean enabled) {
+        this.consistencyOverride = enabled;
+        return this;
+    }
+
+    /**
+     * Enables consistency checks for this chain.
+     */
+    public ActionsChain checkLocators() {
+        return withConsistencyCheck(true);
+    }
+
+    /**
+     * Disables consistency checks for this chain.
+     */
+    public ActionsChain disableLocatorChecks() {
+        return withConsistencyCheck(false);
+    }
+
+    /**
+     * Selects the current intent target for subsequent actions.
+     */
+    public ActionsChain into(String intentPhrase) {
+        this.currentIntent = intentPhrase;
+        return this;
+    }
+
+    /**
+     * Alias for {@link #into(String)}.
      */
     public ActionsChain at(String intentPhrase) {
         return into(intentPhrase);
     }
 
-    private String requireCurrentIntent() {
-        if (currentIntent == null || currentIntent.isBlank()) {
-            throw new IllegalStateException(
-                    "No current intent set. Call into(...) or at(...) before send()/click()/performClick()."
-            );
-        }
-        return currentIntent;
-    }
-
     /**
-     * Queue sending keys to the current intent.
+     * Adds a sendKeys step for the current intent.
      */
     public ActionsChain send(CharSequence... keys) {
         final String intent = requireCurrentIntent();
@@ -58,8 +103,7 @@ public final class ActionsChain {
     }
 
     /**
-     * Queue click on the current intent.
-     * (Use together with perform() if нужно накапливать действия.)
+     * Adds a click step for the current intent.
      */
     public ActionsChain click() {
         final String intent = requireCurrentIntent();
@@ -68,11 +112,30 @@ public final class ActionsChain {
     }
 
     /**
-     * Execute all queued actions in order.
+     * Executes all accumulated steps.
      */
     public void perform() {
-        for (Consumer<IntentiumWebDriver> step : steps) {
-            step.accept(intentium);
+        ResolvedElementLogger originalLogger = intentium.getResolvedElementLogger();
+        boolean originalConsistency = intentium.isConsistencyCheckEnabled();
+
+        try {
+            if (loggerOverrideSpecified) {
+                intentium.setResolvedElementLogger(loggerOverrideValue);
+            }
+            if (consistencyOverride != null) {
+                intentium.withConsistencyCheck(consistencyOverride);
+            }
+
+            for (Consumer<IntentiumWebDriver> step : steps) {
+                step.accept(intentium);
+            }
+        } finally {
+            if (loggerOverrideSpecified) {
+                intentium.setResolvedElementLogger(originalLogger);
+            }
+            if (consistencyOverride != null) {
+                intentium.withConsistencyCheck(originalConsistency);
+            }
         }
     }
 
@@ -88,5 +151,12 @@ public final class ActionsChain {
     public void performClick() {
         click();
         perform();
+    }
+
+    private String requireCurrentIntent() {
+        if (currentIntent == null || currentIntent.isBlank()) {
+            throw new IllegalStateException("No current intent selected. Call into(...) or at(...) first.");
+        }
+        return currentIntent;
     }
 }

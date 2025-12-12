@@ -9,14 +9,16 @@ import org.openqa.selenium.WebElement;
 import java.util.*;
 
 /**
- * High-level entry point for using Intentium with Selenium WebDriver.
- *
- * v0.1:
- * - Resolve human intent ("login field") to IntentRole
- * - Collect candidates from the current page
- * - Select the best matching WebElement
- * - Optionally log XPath and CSS for the resolved element
- * - Optionally verify that XPath and CSS resolve to the same DOM element
+ * High-level Intentium entry point for Selenium WebDriver.
+ * <p>
+ * Responsibilities:
+ * <ul>
+ *   <li>Resolve a human intent phrase to an {@link IntentRole}</li>
+ *   <li>Collect DOM candidates via {@link WebDriverDomMapper}</li>
+ *   <li>Select the best candidate via {@link ElementSelector}</li>
+ *   <li>Optionally log XPath/CSS via {@link ResolvedElementLogger}</li>
+ *   <li>Optionally verify XPath/CSS consistency</li>
+ * </ul>
  */
 public class IntentiumWebDriver {
 
@@ -25,32 +27,22 @@ public class IntentiumWebDriver {
     private final IntentResolver intentResolver;
     private final ElementSelector elementSelector;
     private final WebDriverDomMapper domMapper;
-    private final ResolvedElementLogger resolvedElementLogger;
 
     /**
-     * If enabled, Intentium will re-resolve the selected element by the
-     * generated XPath and CSS selectors and ensure they point to the same
-     * DOM node as the original WebElement.
+     * Mutable to support runtime overrides and DSL sugar.
      */
+    private ResolvedElementLogger resolvedElementLogger;
+
     private boolean consistencyCheckEnabled = false;
 
-    /**
-     * Construct IntentiumWebDriver with default resolver/selector and no logging.
-     */
     public IntentiumWebDriver(WebDriver driver, Language language) {
         this(driver, language, new DefaultIntentResolver(), new DefaultElementSelector(), null);
     }
 
-    /**
-     * Construct IntentiumWebDriver with default resolver/selector and custom logger.
-     */
     public IntentiumWebDriver(WebDriver driver, Language language, ResolvedElementLogger logger) {
         this(driver, language, new DefaultIntentResolver(), new DefaultElementSelector(), logger);
     }
 
-    /**
-     * Construct IntentiumWebDriver with custom resolver/selector and no logging.
-     */
     public IntentiumWebDriver(
             WebDriver driver,
             Language language,
@@ -60,9 +52,6 @@ public class IntentiumWebDriver {
         this(driver, language, intentResolver, elementSelector, null);
     }
 
-    /**
-     * Full constructor with custom resolver, selector and logger.
-     */
     public IntentiumWebDriver(
             WebDriver driver,
             Language language,
@@ -78,22 +67,61 @@ public class IntentiumWebDriver {
         this.resolvedElementLogger = logger;
     }
 
+    // ----------- configuration (low-level) -----------
+
     /**
-     * Enable XPath/CSS consistency check for resolved elements.
-     *
-     * @return this for chaining
+     * Sets a custom logger implementation for resolved elements.
      */
-    public IntentiumWebDriver enableConsistencyCheck() {
+    public IntentiumWebDriver withLogger(ResolvedElementLogger logger) {
+        this.resolvedElementLogger = logger;
+        return this;
+    }
+
+    /**
+     * Enables stdout logging using a built-in {@link StdOutResolvedElementLogger}.
+     */
+    public IntentiumWebDriver withLoggingToStdOut(LocatorLogDetail detail) {
+        this.resolvedElementLogger = new StdOutResolvedElementLogger(detail);
+        return this;
+    }
+
+    /**
+     * Enables or disables XPath/CSS consistency checks for this instance.
+     */
+    public IntentiumWebDriver withConsistencyCheck(boolean enabled) {
+        this.consistencyCheckEnabled = enabled;
+        return this;
+    }
+
+    // ----------- configuration (sugar, minimal set) -----------
+
+    /**
+     * Sugar: enables stdout logging of both XPath and CSS.
+     */
+    public IntentiumWebDriver logLocators() {
+        return withLoggingToStdOut(LocatorLogDetail.BOTH);
+    }
+
+    /**
+     * Sugar: disables locator logging.
+     */
+    public IntentiumWebDriver disableLocatorLogging() {
+        this.resolvedElementLogger = null;
+        return this;
+    }
+
+    /**
+     * Sugar: enables consistency checks.
+     */
+    public IntentiumWebDriver checkLocators() {
         this.consistencyCheckEnabled = true;
         return this;
     }
 
     /**
-     * Disable XPath/CSS consistency check.
-     *
-     * @return this for chaining
+     * Sugar: disables consistency checks.
      */
-    public IntentiumWebDriver disableConsistencyCheck() {
+    public IntentiumWebDriver disableLocatorChecks() {
         this.consistencyCheckEnabled = false;
         return this;
     }
@@ -102,24 +130,29 @@ public class IntentiumWebDriver {
         return consistencyCheckEnabled;
     }
 
+    // package-private for ActionsChain overrides
+    ResolvedElementLogger getResolvedElementLogger() {
+        return resolvedElementLogger;
+    }
+
+    void setResolvedElementLogger(ResolvedElementLogger logger) {
+        this.resolvedElementLogger = logger;
+    }
+
+    // ----------- main API -----------
+
     /**
-     * Resolve a human-readable intent into a WebElement on the current page.
+     * Resolves an intent phrase to a WebElement on the current page.
      *
-     * @param intentPhrase e.g. "login field", "поле логина"
-     * @return best matching WebElement
-     *
-     * @throws IntentResolutionException  if the phrase cannot be mapped to a role
-     * @throws ElementSelectionException  if no suitable element is found
-     *                                    or the result is ambiguous
+     * @throws IntentResolutionException if the phrase cannot be mapped to a role
+     * @throws ElementSelectionException if the element cannot be selected
      */
     public WebElement findElement(String intentPhrase) {
         IntentRole role = intentResolver.resolveRole(intentPhrase, language);
 
         Map<DomElementInfo, WebElement> candidatesMap = domMapper.collectCandidates();
         if (candidatesMap.isEmpty()) {
-            throw new ElementSelectionException(
-                    "No candidates found on page for role " + role
-            );
+            throw new ElementSelectionException("No candidates found on page for role " + role);
         }
 
         List<DomElementInfo> domCandidates = new ArrayList<>(candidatesMap.keySet());
@@ -133,21 +166,13 @@ public class IntentiumWebDriver {
             );
         }
 
-        // Build locators once, use for logging and (optionally) for consistency check
         String xPath = buildSimpleXPath(webElement);
         String css = buildSimpleCssSelector(webElement);
 
         if (resolvedElementLogger != null) {
-            resolvedElementLogger.logResolvedElement(
-                    intentPhrase,
-                    role,
-                    xPath,
-                    css,
-                    elementInfo
-            );
+            resolvedElementLogger.logResolvedElement(intentPhrase, role, xPath, css, elementInfo);
         }
 
-        // Optional double-check: XPath and CSS should point to the same DOM node
         if (consistencyCheckEnabled) {
             runConsistencyCheck(intentPhrase, role, webElement, xPath, css);
         }
@@ -156,59 +181,48 @@ public class IntentiumWebDriver {
     }
 
     /**
-     * Convenience: click on element resolved from intent.
+     * Convenience: resolves by intent and clicks.
      */
     public void click(String intentPhrase) {
-        WebElement element = findElement(intentPhrase);
-        element.click();
+        findElement(intentPhrase).click();
     }
 
     /**
-     * Convenience: send keys to element resolved from intent.
+     * Convenience: resolves by intent and sends keys.
      */
     public void sendKeys(String intentPhrase, CharSequence... keys) {
-        WebElement element = findElement(intentPhrase);
-        element.sendKeys(keys);
+        findElement(intentPhrase).sendKeys(keys);
     }
 
     /**
-     * Get a simple XPath representation for a resolved element.
-     * v0.1: very simple implementation.
+     * Returns a simple XPath for the resolved element (v0.1).
      */
     public String getXPath(String intentPhrase) {
-        WebElement element = findElement(intentPhrase);
-        return buildSimpleXPath(element);
+        return buildSimpleXPath(findElement(intentPhrase));
     }
 
     /**
-     * Get a simple CSS selector representation for a resolved element.
-     * v0.1: very simple implementation.
+     * Returns a simple CSS selector for the resolved element (v0.1).
      */
     public String getCssSelector(String intentPhrase) {
-        WebElement element = findElement(intentPhrase);
-        return buildSimpleCssSelector(element);
+        return buildSimpleCssSelector(findElement(intentPhrase));
     }
 
     /**
-     * Start a single-intent fluent action:
-     * intentium.into("login field").send("user");
+     * Starts a single-intent action helper.
      */
     public SingleIntentAction into(String intentPhrase) {
         return new SingleIntentAction(this, intentPhrase);
     }
 
     /**
-     * Start a chain of actions:
-     * actionsChain()
-     *   .into("login field").send("user")
-     *   .into("password field").send("secret")
-     *   .at("login button").performClick();
+     * Starts an action chain DSL.
      */
     public ActionsChain actionsChain() {
         return new ActionsChain(this);
     }
 
-    // --- simple locator builders, v0.1 ---
+    // ----------- simple locator builders (v0.1) -----------
 
     String buildSimpleXPath(WebElement element) {
         String id = element.getAttribute("id");
@@ -221,7 +235,6 @@ public class IntentiumWebDriver {
             return "//" + element.getTagName() + "[@name='" + name.replace("'", "\\'") + "']";
         }
 
-        // fallback: just tagName (not very stable, but better than nothing)
         return "//" + element.getTagName();
     }
 
@@ -236,11 +249,10 @@ public class IntentiumWebDriver {
             return element.getTagName() + "[name='" + name.replace("'", "\\'") + "']";
         }
 
-        // fallback: just tagName
         return element.getTagName();
     }
 
-    // --- consistency check implementation ---
+    // ----------- consistency check -----------
 
     private void runConsistencyCheck(
             String intentPhrase,
@@ -249,7 +261,6 @@ public class IntentiumWebDriver {
             String xPath,
             String cssSelector
     ) {
-        // Если локаторы совсем уж общие (//input и "input"), проверка только создаст шум.
         if (isGenericLocator(original, xPath, cssSelector)) {
             return;
         }
@@ -280,13 +291,8 @@ public class IntentiumWebDriver {
 
     private boolean isGenericLocator(WebElement element, String xPath, String cssSelector) {
         String tag = element.getTagName();
-        String genericXPath = "//" + tag;
-        String genericCss = tag;
-
-        boolean xpathGeneric = genericXPath.equals(xPath);
-        boolean cssGeneric = genericCss.equals(cssSelector);
-
-        // Если хотя бы один из локаторов совсем общий — не мучаем страницу двойной проверкой.
+        boolean xpathGeneric = ("//" + tag).equals(xPath);
+        boolean cssGeneric = tag.equals(cssSelector);
         return xpathGeneric || cssGeneric;
     }
 }
