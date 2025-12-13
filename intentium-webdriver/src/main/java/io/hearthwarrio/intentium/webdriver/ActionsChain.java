@@ -1,25 +1,37 @@
 package io.hearthwarrio.intentium.webdriver;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Objects;
+import io.hearthwarrio.intentium.core.DomElementInfo;
+import org.openqa.selenium.WebElement;
+
+import java.util.*;
 import java.util.function.Consumer;
 
 /**
  * DSL for executing a sequence of intent-driven actions.
  * <p>
  * Supports optional overrides for logging and consistency checks at chain level.
+ * <p>
+ * Per-chain caching:
+ * - DOM candidates are collected once per perform()
+ * - each intent phrase is resolved once per perform()
+ * - cache is invalidated automatically if the current URL changes mid-chain
  */
 public final class ActionsChain {
 
     private final IntentiumWebDriver intentium;
 
     private String currentIntent;
-    private final List<Consumer<IntentiumWebDriver>> steps = new ArrayList<>();
+
+    private final List<Consumer<ExecutionContext>> steps = new ArrayList<>();
 
     private boolean loggerOverrideSpecified = false;
     private ResolvedElementLogger loggerOverrideValue = null;
 
+    /**
+     * Tri-state:
+     * null – no override, keep driver setting
+     * true/false – override for this chain execution
+     */
     private Boolean consistencyOverride = null;
 
     public ActionsChain(IntentiumWebDriver intentium) {
@@ -87,21 +99,6 @@ public final class ActionsChain {
     }
 
     /**
-     * Sugar alias for into(intentPhrase).send(keys).
-     */
-    public ActionsChain type(String intentPhrase, CharSequence... keys) {
-        return into(intentPhrase).send(keys);
-    }
-
-    /**
-     * Sugar: sets current intent via at(...) and performs click+perform().
-     */
-    public void performClickAt(String intentPhrase) {
-        at(intentPhrase);
-        performClick();
-    }
-
-    /**
      * Alias for {@link #into(String)}.
      */
     public ActionsChain at(String intentPhrase) {
@@ -113,7 +110,7 @@ public final class ActionsChain {
      */
     public ActionsChain send(CharSequence... keys) {
         final String intent = requireCurrentIntent();
-        steps.add(iw -> iw.sendKeys(intent, keys));
+        steps.add(ctx -> ctx.resolve(intent, false).element.sendKeys(keys));
         return this;
     }
 
@@ -122,8 +119,23 @@ public final class ActionsChain {
      */
     public ActionsChain click() {
         final String intent = requireCurrentIntent();
-        steps.add(iw -> iw.click(intent));
+        steps.add(ctx -> ctx.resolve(intent, false).element.click());
         return this;
+    }
+
+    /**
+     * Sugar alias for into(intentPhrase).send(keys).
+     */
+    public ActionsChain type(String intentPhrase, CharSequence... keys) {
+        return into(intentPhrase).send(keys);
+    }
+
+    /**
+     * Sugar: at(intentPhrase) + performClick().
+     */
+    public void performClickAt(String intentPhrase) {
+        at(intentPhrase);
+        performClick();
     }
 
     /**
@@ -141,8 +153,10 @@ public final class ActionsChain {
                 intentium.withConsistencyCheck(consistencyOverride);
             }
 
-            for (Consumer<IntentiumWebDriver> step : steps) {
-                step.accept(intentium);
+            ExecutionContext ctx = ExecutionContext.create(intentium);
+
+            for (Consumer<ExecutionContext> step : steps) {
+                step.accept(ctx);
             }
         } finally {
             if (loggerOverrideSpecified) {
@@ -155,13 +169,7 @@ public final class ActionsChain {
     }
 
     /**
-     * Convenience: add click for current intent
-     * and execute chain immediately.
-     *
-     * actionsChain()
-     *   .into("login field").send("user")
-     *   .into("password field").send("secret")
-     *   .at("login button").performClick();
+     * Convenience: add click for current intent and execute chain immediately.
      */
     public void performClick() {
         click();
@@ -173,5 +181,64 @@ public final class ActionsChain {
             throw new IllegalStateException("No current intent selected. Call into(...) or at(...) first.");
         }
         return currentIntent;
+    }
+
+    /**
+     * Per-execution context holding a DOM snapshot and a cache of resolved intents.
+     */
+    private static final class ExecutionContext {
+
+        private final IntentiumWebDriver intentium;
+
+        private String urlSnapshot;
+
+        private Map<DomElementInfo, WebElement> candidatesMap;
+        private List<DomElementInfo> domCandidates;
+
+        private final Map<String, IntentiumWebDriver.ResolvedElement> resolvedCache = new HashMap<>();
+
+        private ExecutionContext(IntentiumWebDriver intentium) {
+            this.intentium = intentium;
+            refreshSnapshot();
+        }
+
+        static ExecutionContext create(IntentiumWebDriver intentium) {
+            return new ExecutionContext(intentium);
+        }
+
+        IntentiumWebDriver.ResolvedElement resolve(String intentPhrase, boolean forceLocators) {
+            ensureSnapshotIsValid();
+
+            String cacheKey = intentPhrase + "|forceLocators=" + forceLocators;
+            IntentiumWebDriver.ResolvedElement cached = resolvedCache.get(cacheKey);
+            if (cached != null) {
+                return cached;
+            }
+
+            IntentiumWebDriver.ResolvedElement resolved =
+                    intentium.resolveIntent(intentPhrase, candidatesMap, domCandidates, forceLocators);
+
+            resolvedCache.put(cacheKey, resolved);
+            return resolved;
+        }
+
+        private void ensureSnapshotIsValid() {
+            String currentUrl = intentium.currentUrl();
+            if (!Objects.equals(currentUrl, urlSnapshot)) {
+                refreshSnapshot();
+            }
+        }
+
+        private void refreshSnapshot() {
+            this.urlSnapshot = intentium.currentUrl();
+
+            this.candidatesMap = intentium.collectCandidates();
+            if (candidatesMap.isEmpty()) {
+                throw new IllegalStateException("No DOM candidates found – cannot execute chain.");
+            }
+
+            this.domCandidates = new ArrayList<>(candidatesMap.keySet());
+            this.resolvedCache.clear();
+        }
     }
 }
