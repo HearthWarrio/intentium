@@ -87,6 +87,21 @@ public final class ActionsChain {
     }
 
     /**
+     * Sugar alias for into(intentPhrase).send(keys).
+     */
+    public ActionsChain type(String intentPhrase, CharSequence... keys) {
+        return into(intentPhrase).send(keys);
+    }
+
+    /**
+     * Sugar: sets current intent via at(...) and performs click+perform().
+     */
+    public void performClickAt(String intentPhrase) {
+        at(intentPhrase);
+        performClick();
+    }
+
+    /**
      * Alias for {@link #into(String)}.
      */
     public ActionsChain at(String intentPhrase) {
