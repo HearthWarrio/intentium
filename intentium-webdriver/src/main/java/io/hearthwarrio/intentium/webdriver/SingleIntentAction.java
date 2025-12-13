@@ -2,9 +2,14 @@ package io.hearthwarrio.intentium.webdriver;
 
 import org.openqa.selenium.WebElement;
 
+
 /**
- * Fluent helper for a single intent like:
+ * Small helper for single-intent operations.
+ * <p>
+ * Example:
+ * <pre>
  * intentium.into("login field").send("user");
+ * </pre>
  */
 public final class SingleIntentAction {
 
