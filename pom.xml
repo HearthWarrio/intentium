@@ -14,6 +14,7 @@
         <module>intentium-webdriver</module>
         <module>intentium-examples</module>
         <module>intentium-allure</module>
+        <module>intentium-testkit</module>
     </modules>
 
     <properties>
