@@ -35,6 +35,35 @@ public class IntentiumWebDriver {
 
     private boolean consistencyCheckEnabled = false;
 
+    /**
+     * Internal resolved element data container used for caching within a chain.
+     * Package-private on purpose.
+     */
+    static final class ResolvedElement {
+        final String intentPhrase;
+        final IntentRole role;
+        final DomElementInfo elementInfo;
+        final WebElement element;
+        final String xPath;       // may be null when not needed
+        final String cssSelector; // may be null when not needed
+
+        ResolvedElement(
+                String intentPhrase,
+                IntentRole role,
+                DomElementInfo elementInfo,
+                WebElement element,
+                String xPath,
+                String cssSelector
+        ) {
+            this.intentPhrase = intentPhrase;
+            this.role = role;
+            this.elementInfo = elementInfo;
+            this.element = element;
+            this.xPath = xPath;
+            this.cssSelector = cssSelector;
+        }
+    }
+
     public IntentiumWebDriver(WebDriver driver, Language language) {
         this(driver, language, new DefaultIntentResolver(), new DefaultElementSelector(), null);
     }
@@ -139,73 +168,57 @@ public class IntentiumWebDriver {
         this.resolvedElementLogger = logger;
     }
 
+    /**
+     * Current URL helper for chain snapshot invalidation.
+     */
+    String currentUrl() {
+        return driver.getCurrentUrl();
+    }
+
+    /**
+     * Collects DOM candidates once. Package-private for chain-level caching.
+     */
+    Map<DomElementInfo, WebElement> collectCandidates() {
+        return domMapper.collectCandidates();
+    }
+
     // ----------- main API -----------
 
     /**
      * Resolves an intent phrase to a WebElement on the current page.
-     *
-     * @throws IntentResolutionException if the phrase cannot be mapped to a role
-     * @throws ElementSelectionException if the element cannot be selected
      */
     public WebElement findElement(String intentPhrase) {
-        IntentRole role = intentResolver.resolveRole(intentPhrase, language);
-
-        Map<DomElementInfo, WebElement> candidatesMap = domMapper.collectCandidates();
-        if (candidatesMap.isEmpty()) {
-            throw new ElementSelectionException("No candidates found on page for role " + role);
-        }
-
-        List<DomElementInfo> domCandidates = new ArrayList<>(candidatesMap.keySet());
-        ElementMatch match = elementSelector.selectBest(role, domCandidates);
-
-        DomElementInfo elementInfo = match.getElement();
-        WebElement webElement = candidatesMap.get(elementInfo);
-        if (webElement == null) {
-            throw new ElementSelectionException(
-                    "Internal error: selected DomElementInfo has no corresponding WebElement"
-            );
-        }
-
-        String xPath = buildSimpleXPath(webElement);
-        String css = buildSimpleCssSelector(webElement);
-
-        if (resolvedElementLogger != null) {
-            resolvedElementLogger.logResolvedElement(intentPhrase, role, xPath, css, elementInfo);
-        }
-
-        if (consistencyCheckEnabled) {
-            runConsistencyCheck(intentPhrase, role, webElement, xPath, css);
-        }
-
-        return webElement;
+        return resolveIntent(intentPhrase, false).element;
     }
 
     /**
      * Convenience: resolves by intent and clicks.
      */
     public void click(String intentPhrase) {
-        findElement(intentPhrase).click();
+        resolveIntent(intentPhrase, false).element.click();
     }
 
     /**
      * Convenience: resolves by intent and sends keys.
      */
     public void sendKeys(String intentPhrase, CharSequence... keys) {
-        findElement(intentPhrase).sendKeys(keys);
+        resolveIntent(intentPhrase, false).element.sendKeys(keys);
     }
 
     /**
      * Returns a simple XPath for the resolved element (v0.1).
      */
     public String getXPath(String intentPhrase) {
-        return buildSimpleXPath(findElement(intentPhrase));
+        ResolvedElement r = resolveIntent(intentPhrase, true);
+        return r.xPath;
     }
 
     /**
      * Returns a simple CSS selector for the resolved element (v0.1).
      */
     public String getCssSelector(String intentPhrase) {
-        return buildSimpleCssSelector(findElement(intentPhrase));
+        ResolvedElement r = resolveIntent(intentPhrase, true);
+        return r.cssSelector;
     }
 
     /**
@@ -220,6 +233,63 @@ public class IntentiumWebDriver {
      */
     public ActionsChain actionsChain() {
         return new ActionsChain(this);
+    }
+
+    // ----------- internal resolve API (for caching) -----------
+
+    ResolvedElement resolveIntent(String intentPhrase, boolean forceLocators) {
+        Map<DomElementInfo, WebElement> candidatesMap = collectCandidates();
+        if (candidatesMap.isEmpty()) {
+            throw new ElementSelectionException("No candidates found on page");
+        }
+        List<DomElementInfo> domCandidates = new ArrayList<>(candidatesMap.keySet());
+        return resolveIntent(intentPhrase, candidatesMap, domCandidates, forceLocators);
+    }
+
+    ResolvedElement resolveIntent(
+            String intentPhrase,
+            Map<DomElementInfo, WebElement> candidatesMap,
+            List<DomElementInfo> domCandidates,
+            boolean forceLocators
+    ) {
+        IntentRole role = intentResolver.resolveRole(intentPhrase, language);
+
+        if (candidatesMap == null || candidatesMap.isEmpty()) {
+            throw new ElementSelectionException("No candidates found on page for role " + role);
+        }
+        if (domCandidates == null || domCandidates.isEmpty()) {
+            throw new ElementSelectionException("No candidates found on page for role " + role);
+        }
+
+        ElementMatch match = elementSelector.selectBest(role, domCandidates);
+
+        DomElementInfo elementInfo = match.getElement();
+        WebElement webElement = candidatesMap.get(elementInfo);
+        if (webElement == null) {
+            throw new ElementSelectionException(
+                    "Internal error: selected DomElementInfo has no corresponding WebElement"
+            );
+        }
+
+        boolean needLocators = forceLocators || resolvedElementLogger != null || consistencyCheckEnabled;
+
+        String xPath = null;
+        String css = null;
+
+        if (needLocators) {
+            xPath = buildSimpleXPath(webElement);
+            css = buildSimpleCssSelector(webElement);
+        }
+
+        if (resolvedElementLogger != null) {
+            resolvedElementLogger.logResolvedElement(intentPhrase, role, xPath, css, elementInfo);
+        }
+
+        if (consistencyCheckEnabled) {
+            runConsistencyCheck(intentPhrase, role, webElement, xPath, css);
+        }
+
+        return new ResolvedElement(intentPhrase, role, elementInfo, webElement, xPath, css);
     }
 
     // ----------- simple locator builders (v0.1) -----------
@@ -261,6 +331,13 @@ public class IntentiumWebDriver {
             String xPath,
             String cssSelector
     ) {
+        if (xPath == null || cssSelector == null) {
+            throw new ElementSelectionException(
+                    "Locator consistency check cannot run because xPath/cssSelector is null for intent '" +
+                            intentPhrase + "', role " + role
+            );
+        }
+
         if (isGenericLocator(original, xPath, cssSelector)) {
             return;
         }
