@@ -1,5 +1,8 @@
 package io.hearthwarrio.intentium.webdriver;
 
+import io.hearthwarrio.intentium.core.DomElementInfo;
+import org.openqa.selenium.WebElement;
+
 import java.util.*;
 import java.util.function.Consumer;
 
@@ -189,7 +192,7 @@ public final class ActionsChain {
 
         private String urlSnapshot;
 
-        private IntentiumWebDriver.CandidatesSnapshot snapshot;
+        private IntentiumWebDriver.CandidatesSnapshot candidatesSnapshot;
 
         private final Map<String, IntentiumWebDriver.ResolvedElement> resolvedCache = new HashMap<>();
 
@@ -212,7 +215,7 @@ public final class ActionsChain {
             }
 
             IntentiumWebDriver.ResolvedElement resolved =
-                    intentium.resolveIntent(intentPhrase, snapshot, forceLocators);
+                    intentium.resolveIntent(intentPhrase, candidatesSnapshot, forceLocators);
 
             resolvedCache.put(cacheKey, resolved);
             return resolved;
@@ -228,8 +231,8 @@ public final class ActionsChain {
         private void refreshSnapshot() {
             this.urlSnapshot = intentium.currentUrl();
 
-            this.snapshot = intentium.collectCandidatesSnapshot();
-            if (snapshot.domCandidates.isEmpty()) {
+            this.candidatesSnapshot = intentium.collectCandidatesSnapshot();
+            if (candidatesSnapshot.domCandidates.isEmpty()) {
                 throw new IllegalStateException("No DOM candidates found – cannot execute chain.");
             }
             this.resolvedCache.clear();
