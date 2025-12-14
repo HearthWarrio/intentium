@@ -6,7 +6,8 @@ import org.openqa.selenium.NoSuchElementException;
 import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.WebElement;
 
-import java.util.LinkedHashMap;
+import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -24,17 +25,56 @@ public class WebDriverDomMapper {
     }
 
     /**
+     * Candidate pair: DomElementInfo snapshot instance + its underlying WebElement.
+     * <p>
+     * We keep the {@link DomElementInfo} instance identity stable inside one snapshot,
+     * to avoid accidental de-duplication when DomElementInfo.equals/hashCode match.
+     */
+    static final class Candidate {
+        private final DomElementInfo info;
+        private final WebElement element;
+
+        Candidate(DomElementInfo info, WebElement element) {
+            this.info = Objects.requireNonNull(info, "info must not be null");
+            this.element = Objects.requireNonNull(element, "element must not be null");
+        }
+
+        DomElementInfo getInfo() {
+            return info;
+        }
+
+        WebElement getElement() {
+            return element;
+        }
+    }
+
+    /**
      * Collect all candidate elements on the current page
      * and return a map DomElementInfo -> WebElement for further selection.
      */
     public Map<DomElementInfo, WebElement> collectCandidates() {
-        Map<DomElementInfo, WebElement> result = new LinkedHashMap<>();
+        // Backward-compatible map view; uses identity semantics to prevent accidental key collisions.
+        Map<DomElementInfo, WebElement> result = new IdentityHashMap<>();
+        for (Candidate c : collectCandidateList()) {
+            result.put(c.getInfo(), c.getElement());
+        }
+        return result;
+    }
+
+    /**
+     * Collect all candidate elements on the current page
+     * and return an ordered list of pairs (DomElementInfo, WebElement).
+     * <p>
+     * Order follows {@link WebDriver#findElements(By)} order.
+     */
+    List<Candidate> collectCandidateList() {
+        List<Candidate> result = new ArrayList<>();
 
         List<WebElement> elements = driver.findElements(By.cssSelector("input, button"));
 
         for (WebElement element : elements) {
             DomElementInfo info = toDomElementInfo(element);
-            result.put(info, element);
+            result.add(new Candidate(info, element));
         }
 
         return result;

@@ -36,6 +36,26 @@ public class IntentiumWebDriver {
     private boolean consistencyCheckEnabled = false;
 
     /**
+     * Snapshot of candidates collected from the current page.
+     * <p>
+     * Holds:
+     * <ul>
+     *   <li>Ordered list of {@link DomElementInfo} candidates</li>
+     *   <li>Identity-based mapping DomElementInfo instance -> WebElement</li>
+     * </ul>
+     * This avoids accidental candidate de-duplication when {@link DomElementInfo#equals(Object)} matches.
+     */
+    static final class CandidatesSnapshot {
+        final List<DomElementInfo> domCandidates;
+        final Map<DomElementInfo, WebElement> elementsByInfo;
+
+        CandidatesSnapshot(List<DomElementInfo> domCandidates, Map<DomElementInfo, WebElement> elementsByInfo) {
+            this.domCandidates = domCandidates;
+            this.elementsByInfo = elementsByInfo;
+        }
+    }
+
+    /**
      * Internal resolved element data container used for caching within a chain.
      * Package-private on purpose.
      */
@@ -98,25 +118,16 @@ public class IntentiumWebDriver {
 
     // ----------- configuration (low-level) -----------
 
-    /**
-     * Sets a custom logger implementation for resolved elements.
-     */
     public IntentiumWebDriver withLogger(ResolvedElementLogger logger) {
         this.resolvedElementLogger = logger;
         return this;
     }
 
-    /**
-     * Enables stdout logging using a built-in {@link StdOutResolvedElementLogger}.
-     */
     public IntentiumWebDriver withLoggingToStdOut(LocatorLogDetail detail) {
         this.resolvedElementLogger = new StdOutResolvedElementLogger(detail);
         return this;
     }
 
-    /**
-     * Enables or disables XPath/CSS consistency checks for this instance.
-     */
     public IntentiumWebDriver withConsistencyCheck(boolean enabled) {
         this.consistencyCheckEnabled = enabled;
         return this;
@@ -124,32 +135,20 @@ public class IntentiumWebDriver {
 
     // ----------- configuration (sugar, minimal set) -----------
 
-    /**
-     * Sugar: enables stdout logging of both XPath and CSS.
-     */
     public IntentiumWebDriver logLocators() {
         return withLoggingToStdOut(LocatorLogDetail.BOTH);
     }
 
-    /**
-     * Sugar: disables locator logging.
-     */
     public IntentiumWebDriver disableLocatorLogging() {
         this.resolvedElementLogger = null;
         return this;
     }
 
-    /**
-     * Sugar: enables consistency checks.
-     */
     public IntentiumWebDriver checkLocators() {
         this.consistencyCheckEnabled = true;
         return this;
     }
 
-    /**
-     * Sugar: disables consistency checks.
-     */
     public IntentiumWebDriver disableLocatorChecks() {
         this.consistencyCheckEnabled = false;
         return this;
@@ -168,69 +167,60 @@ public class IntentiumWebDriver {
         this.resolvedElementLogger = logger;
     }
 
-    /**
-     * Current URL helper for chain snapshot invalidation.
-     */
     String currentUrl() {
         return driver.getCurrentUrl();
     }
 
-    /**
-     * Collects DOM candidates once. Package-private for chain-level caching.
-     */
+    CandidatesSnapshot collectCandidatesSnapshot() {
+        List<WebDriverDomMapper.Candidate> pairs = domMapper.collectCandidateList();
+        if (pairs.isEmpty()) {
+            return new CandidatesSnapshot(Collections.emptyList(), Collections.emptyMap());
+        }
+
+        Map<DomElementInfo, WebElement> elementsByInfo = new IdentityHashMap<>();
+        List<DomElementInfo> domCandidates = new ArrayList<>(pairs.size());
+
+        for (WebDriverDomMapper.Candidate c : pairs) {
+            DomElementInfo info = c.getInfo();
+            domCandidates.add(info);
+            elementsByInfo.put(info, c.getElement());
+        }
+
+        return new CandidatesSnapshot(domCandidates, elementsByInfo);
+    }
+
     Map<DomElementInfo, WebElement> collectCandidates() {
-        return domMapper.collectCandidates();
+        return collectCandidatesSnapshot().elementsByInfo;
     }
 
     // ----------- main API -----------
 
-    /**
-     * Resolves an intent phrase to a WebElement on the current page.
-     */
     public WebElement findElement(String intentPhrase) {
         return resolveIntent(intentPhrase, false).element;
     }
 
-    /**
-     * Convenience: resolves by intent and clicks.
-     */
     public void click(String intentPhrase) {
         resolveIntent(intentPhrase, false).element.click();
     }
 
-    /**
-     * Convenience: resolves by intent and sends keys.
-     */
     public void sendKeys(String intentPhrase, CharSequence... keys) {
         resolveIntent(intentPhrase, false).element.sendKeys(keys);
     }
 
-    /**
-     * Returns a simple XPath for the resolved element (v0.1).
-     */
     public String getXPath(String intentPhrase) {
         ResolvedElement r = resolveIntent(intentPhrase, true);
         return r.xPath;
     }
 
-    /**
-     * Returns a simple CSS selector for the resolved element (v0.1).
-     */
     public String getCssSelector(String intentPhrase) {
         ResolvedElement r = resolveIntent(intentPhrase, true);
         return r.cssSelector;
     }
 
-    /**
-     * Starts a single-intent action helper.
-     */
     public SingleIntentAction into(String intentPhrase) {
         return new SingleIntentAction(this, intentPhrase);
     }
 
-    /**
-     * Starts an action chain DSL.
-     */
     public ActionsChain actionsChain() {
         return new ActionsChain(this);
     }
@@ -238,36 +228,32 @@ public class IntentiumWebDriver {
     // ----------- internal resolve API (for caching) -----------
 
     ResolvedElement resolveIntent(String intentPhrase, boolean forceLocators) {
-        Map<DomElementInfo, WebElement> candidatesMap = collectCandidates();
-        if (candidatesMap.isEmpty()) {
+        CandidatesSnapshot snapshot = collectCandidatesSnapshot();
+        if (snapshot.domCandidates.isEmpty()) {
             throw new ElementSelectionException("No candidates found on page");
         }
-        List<DomElementInfo> domCandidates = new ArrayList<>(candidatesMap.keySet());
-        return resolveIntent(intentPhrase, candidatesMap, domCandidates, forceLocators);
+        return resolveIntent(intentPhrase, snapshot, forceLocators);
     }
 
     ResolvedElement resolveIntent(
             String intentPhrase,
-            Map<DomElementInfo, WebElement> candidatesMap,
-            List<DomElementInfo> domCandidates,
+            CandidatesSnapshot snapshot,
             boolean forceLocators
     ) {
         IntentRole role = intentResolver.resolveRole(intentPhrase, language);
 
-        if (candidatesMap == null || candidatesMap.isEmpty()) {
-            throw new ElementSelectionException("No candidates found on page for role " + role);
-        }
-        if (domCandidates == null || domCandidates.isEmpty()) {
+        if (snapshot == null || snapshot.domCandidates == null || snapshot.domCandidates.isEmpty()) {
             throw new ElementSelectionException("No candidates found on page for role " + role);
         }
 
-        ElementMatch match = elementSelector.selectBest(role, domCandidates);
+        ElementMatch match = elementSelector.selectBest(role, snapshot.domCandidates);
 
         DomElementInfo elementInfo = match.getElement();
-        WebElement webElement = candidatesMap.get(elementInfo);
+        WebElement webElement = snapshot.elementsByInfo.get(elementInfo);
         if (webElement == null) {
             throw new ElementSelectionException(
-                    "Internal error: selected DomElementInfo has no corresponding WebElement"
+                    "Internal error: selected DomElementInfo has no corresponding WebElement. " +
+                            "ElementSelector must return the same DomElementInfo instance from the provided candidates list."
             );
         }
 
@@ -277,8 +263,8 @@ public class IntentiumWebDriver {
         String css = null;
 
         if (needLocators) {
-            xPath = buildSimpleXPath(webElement);
-            css = buildSimpleCssSelector(webElement);
+            xPath = buildStableXPath(elementInfo, webElement, snapshot);
+            css = buildStableCssSelector(elementInfo, webElement, snapshot);
         }
 
         if (resolvedElementLogger != null) {
@@ -292,17 +278,127 @@ public class IntentiumWebDriver {
         return new ResolvedElement(intentPhrase, role, elementInfo, webElement, xPath, css);
     }
 
-    // ----------- simple locator builders (v0.1) -----------
+    ResolvedElement resolveIntent(
+            String intentPhrase,
+            Map<DomElementInfo, WebElement> candidatesMap,
+            List<DomElementInfo> domCandidates,
+            boolean forceLocators
+    ) {
+        CandidatesSnapshot snapshot = new CandidatesSnapshot(domCandidates, candidatesMap);
+        return resolveIntent(intentPhrase, snapshot, forceLocators);
+    }
+
+    // ----------- locator builders (v0.1+) -----------
+
+    String buildStableXPath(DomElementInfo info, WebElement element, CandidatesSnapshot snapshot) {
+        String tag = safeTagName(info, element);
+
+        String id = safe(info == null ? null : info.getId());
+        if (!id.isBlank()) {
+            return "//*[@id=" + xpathLiteral(id) + "]";
+        }
+
+        String name = safe(info == null ? null : info.getName());
+        if (isUnique(snapshot, tag, d -> d.getName(), name)) {
+            return "//" + tag + "[@name=" + xpathLiteral(name) + "]";
+        }
+
+        String aria = safe(info == null ? null : info.getAriaLabel());
+        if (isUnique(snapshot, tag, d -> d.getAriaLabel(), aria)) {
+            return "//" + tag + "[@aria-label=" + xpathLiteral(aria) + "]";
+        }
+
+        String placeholder = safe(info == null ? null : info.getPlaceholder());
+        if (isUnique(snapshot, tag, d -> d.getPlaceholder(), placeholder)) {
+            return "//" + tag + "[@placeholder=" + xpathLiteral(placeholder) + "]";
+        }
+
+        String title = safe(info == null ? null : info.getTitle());
+        if (isUnique(snapshot, tag, d -> d.getTitle(), title)) {
+            return "//" + tag + "[@title=" + xpathLiteral(title) + "]";
+        }
+
+        String type = safe(info == null ? null : info.getType());
+
+        if (isUnique(snapshot, tag, d -> d.getName(), name, d -> d.getType(), type)) {
+            return "//" + tag + "[@name=" + xpathLiteral(name) + " and @type=" + xpathLiteral(type) + "]";
+        }
+
+        if (isUnique(snapshot, tag, d -> d.getAriaLabel(), aria, d -> d.getType(), type)) {
+            return "//" + tag + "[@aria-label=" + xpathLiteral(aria) + " and @type=" + xpathLiteral(type) + "]";
+        }
+
+        if (isUnique(snapshot, tag, d -> d.getPlaceholder(), placeholder, d -> d.getType(), type)) {
+            return "//" + tag + "[@placeholder=" + xpathLiteral(placeholder) + " and @type=" + xpathLiteral(type) + "]";
+        }
+
+        if (isUnique(snapshot, tag, d -> d.getTitle(), title, d -> d.getType(), type)) {
+            return "//" + tag + "[@title=" + xpathLiteral(title) + " and @type=" + xpathLiteral(type) + "]";
+        }
+
+        return "//" + tag;
+    }
+
+    String buildStableCssSelector(DomElementInfo info, WebElement element, CandidatesSnapshot snapshot) {
+        String tag = safeTagName(info, element);
+
+        String id = safe(info == null ? null : info.getId());
+        if (!id.isBlank()) {
+            return "#" + cssEscapeIdentifier(id);
+        }
+
+        String name = safe(info == null ? null : info.getName());
+        if (isUnique(snapshot, tag, d -> d.getName(), name)) {
+            return tag + "[name=" + cssAttrLiteral(name) + "]";
+        }
+
+        String aria = safe(info == null ? null : info.getAriaLabel());
+        if (isUnique(snapshot, tag, d -> d.getAriaLabel(), aria)) {
+            return tag + "[aria-label=" + cssAttrLiteral(aria) + "]";
+        }
+
+        String placeholder = safe(info == null ? null : info.getPlaceholder());
+        if (isUnique(snapshot, tag, d -> d.getPlaceholder(), placeholder)) {
+            return tag + "[placeholder=" + cssAttrLiteral(placeholder) + "]";
+        }
+
+        String title = safe(info == null ? null : info.getTitle());
+        if (isUnique(snapshot, tag, d -> d.getTitle(), title)) {
+            return tag + "[title=" + cssAttrLiteral(title) + "]";
+        }
+
+        String type = safe(info == null ? null : info.getType());
+
+        if (isUnique(snapshot, tag, d -> d.getName(), name, d -> d.getType(), type)) {
+            return tag + "[name=" + cssAttrLiteral(name) + "][type=" + cssAttrLiteral(type) + "]";
+        }
+
+        if (isUnique(snapshot, tag, d -> d.getAriaLabel(), aria, d -> d.getType(), type)) {
+            return tag + "[aria-label=" + cssAttrLiteral(aria) + "][type=" + cssAttrLiteral(type) + "]";
+        }
+
+        if (isUnique(snapshot, tag, d -> d.getPlaceholder(), placeholder, d -> d.getType(), type)) {
+            return tag + "[placeholder=" + cssAttrLiteral(placeholder) + "][type=" + cssAttrLiteral(type) + "]";
+        }
+
+        if (isUnique(snapshot, tag, d -> d.getTitle(), title, d -> d.getType(), type)) {
+            return tag + "[title=" + cssAttrLiteral(title) + "][type=" + cssAttrLiteral(type) + "]";
+        }
+
+        return tag;
+    }
+
+    // Legacy builders (kept)
 
     String buildSimpleXPath(WebElement element) {
         String id = element.getAttribute("id");
         if (id != null && !id.isBlank()) {
-            return "//*[@id='" + id.replace("'", "\\'") + "']";
+            return "//*[@id=" + xpathLiteral(id) + "]";
         }
 
         String name = element.getAttribute("name");
         if (name != null && !name.isBlank()) {
-            return "//" + element.getTagName() + "[@name='" + name.replace("'", "\\'") + "']";
+            return "//" + element.getTagName() + "[@name=" + xpathLiteral(name) + "]";
         }
 
         return "//" + element.getTagName();
@@ -311,15 +407,144 @@ public class IntentiumWebDriver {
     String buildSimpleCssSelector(WebElement element) {
         String id = element.getAttribute("id");
         if (id != null && !id.isBlank()) {
-            return "#" + id.replace(" ", "\\ ");
+            return "#" + cssEscapeIdentifier(id);
         }
 
         String name = element.getAttribute("name");
         if (name != null && !name.isBlank()) {
-            return element.getTagName() + "[name='" + name.replace("'", "\\'") + "']";
+            return element.getTagName() + "[name=" + cssAttrLiteral(name) + "]";
         }
 
         return element.getTagName();
+    }
+
+    private String safeTagName(DomElementInfo info, WebElement element) {
+        String tag = safe(info == null ? null : info.getTagName());
+        if (!tag.isBlank()) {
+            return tag;
+        }
+        try {
+            String fromElement = element.getTagName();
+            return safe(fromElement);
+        } catch (Exception e) {
+            return "div";
+        }
+    }
+
+    private String safe(String value) {
+        return value == null ? "" : value;
+    }
+
+    private interface StrGetter {
+        String get(DomElementInfo info);
+    }
+
+    private boolean isUnique(CandidatesSnapshot snapshot, String tag, StrGetter getter, String value) {
+        if (snapshot == null || snapshot.domCandidates == null) {
+            return false;
+        }
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        int count = 0;
+        for (DomElementInfo d : snapshot.domCandidates) {
+            if (d == null) {
+                continue;
+            }
+            if (!tagEquals(tag, safe(d.getTagName()))) {
+                continue;
+            }
+            String v = getter.get(d);
+            if (value.equals(v)) {
+                count++;
+                if (count > 1) {
+                    return false;
+                }
+            }
+        }
+        return count == 1;
+    }
+
+    private boolean isUnique(
+            CandidatesSnapshot snapshot,
+            String tag,
+            StrGetter getter1,
+            String value1,
+            StrGetter getter2,
+            String value2
+    ) {
+        if (snapshot == null || snapshot.domCandidates == null) {
+            return false;
+        }
+        if (value1 == null || value1.isBlank() || value2 == null || value2.isBlank()) {
+            return false;
+        }
+        int count = 0;
+        for (DomElementInfo d : snapshot.domCandidates) {
+            if (d == null) {
+                continue;
+            }
+            if (!tagEquals(tag, safe(d.getTagName()))) {
+                continue;
+            }
+            if (value1.equals(getter1.get(d)) && value2.equals(getter2.get(d))) {
+                count++;
+                if (count > 1) {
+                    return false;
+                }
+            }
+        }
+        return count == 1;
+    }
+
+    private boolean tagEquals(String a, String b) {
+        return a != null && b != null && a.equalsIgnoreCase(b);
+    }
+
+    private String xpathLiteral(String value) {
+        if (value == null) {
+            return "''";
+        }
+        if (!value.contains("'")) {
+            return "'" + value + "'";
+        }
+        if (!value.contains("\"")) {
+            return "\"" + value + "\"";
+        }
+
+        String[] parts = value.split("'", -1);
+        StringBuilder sb = new StringBuilder("concat(");
+        for (int i = 0; i < parts.length; i++) {
+            if (i > 0) {
+                sb.append(", \"'\", ");
+            }
+            sb.append("'").append(parts[i]).append("'");
+        }
+        sb.append(")");
+        return sb.toString();
+    }
+
+    private String cssAttrLiteral(String value) {
+        String v = value == null ? "" : value;
+        v = v.replace("\\", "\\\\").replace("'", "\\'");
+        return "'" + v + "'";
+    }
+
+    private String cssEscapeIdentifier(String value) {
+        if (value == null) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < value.length(); i++) {
+            char ch = value.charAt(i);
+            boolean ok = Character.isLetterOrDigit(ch) || ch == '-' || ch == '_';
+            if (ok) {
+                sb.append(ch);
+            } else {
+                sb.append('\\').append(ch);
+            }
+        }
+        return sb.toString();
     }
 
     // ----------- consistency check -----------
