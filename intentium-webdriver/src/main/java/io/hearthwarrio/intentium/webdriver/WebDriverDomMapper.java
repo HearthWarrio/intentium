@@ -13,7 +13,8 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * Extracts DomElementInfo snapshots from a Selenium WebDriver page.
+ * Extracts {@link DomElementInfo} snapshots from a Selenium WebDriver page.
+ * <p>
  * v0.1: collects inputs and buttons on the current page.
  */
 public class WebDriverDomMapper {
@@ -25,10 +26,10 @@ public class WebDriverDomMapper {
     }
 
     /**
-     * Candidate pair: DomElementInfo snapshot instance + its underlying WebElement.
+     * Candidate pair: a {@link DomElementInfo} snapshot instance and the underlying {@link WebElement}.
      * <p>
-     * We keep the {@link DomElementInfo} instance identity stable inside one snapshot,
-     * to avoid accidental de-duplication when DomElementInfo.equals/hashCode match.
+     * Important: {@link DomElementInfo} has {@code equals/hashCode}. Multiple real DOM elements can produce
+     * identical snapshots. We therefore keep identity-stable {@link DomElementInfo} instances per element.
      */
     static final class Candidate {
         private final DomElementInfo info;
@@ -49,11 +50,12 @@ public class WebDriverDomMapper {
     }
 
     /**
-     * Collect all candidate elements on the current page
-     * and return a map DomElementInfo -> WebElement for further selection.
+     * Collect all candidate elements on the current page.
+     * <p>
+     * Kept for backward compatibility, but it uses identity semantics to avoid
+     * accidental de-duplication when two different elements have equal {@link DomElementInfo} snapshots.
      */
     public Map<DomElementInfo, WebElement> collectCandidates() {
-        // Backward-compatible map view; uses identity semantics to prevent accidental key collisions.
         Map<DomElementInfo, WebElement> result = new IdentityHashMap<>();
         for (Candidate c : collectCandidateList()) {
             result.put(c.getInfo(), c.getElement());
@@ -62,10 +64,9 @@ public class WebDriverDomMapper {
     }
 
     /**
-     * Collect all candidate elements on the current page
-     * and return an ordered list of pairs (DomElementInfo, WebElement).
+     * Collect candidates as an ordered list of pairs.
      * <p>
-     * Order follows {@link WebDriver#findElements(By)} order.
+     * Order is the same as returned by {@link WebDriver#findElements(By)}.
      */
     List<Candidate> collectCandidateList() {
         List<Candidate> result = new ArrayList<>();
@@ -81,7 +82,7 @@ public class WebDriverDomMapper {
     }
 
     /**
-     * Build a DomElementInfo snapshot from a WebElement.
+     * Build a {@link DomElementInfo} snapshot from a {@link WebElement}.
      */
     public DomElementInfo toDomElementInfo(WebElement element) {
         String tagName = safeAttr(element::getTagName);
@@ -142,7 +143,7 @@ public class WebDriverDomMapper {
                     }
                 }
             } catch (Exception ignored) {
-
+                // ignore
             }
         }
 
@@ -155,7 +156,7 @@ public class WebDriverDomMapper {
                 }
             }
         } catch (Exception ignored) {
-
+            // ignore
         }
 
         return "";
@@ -191,7 +192,7 @@ public class WebDriverDomMapper {
     }
 
     /**
-     * Very naive CSS escaping for id; v0.1 assumes no экзотики.
+     * Very naive CSS escaping for id; v0.1 assumes no exotic cases.
      */
     private String cssEscape(String value) {
         return value.replace("'", "\\'");
