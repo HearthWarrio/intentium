@@ -6,24 +6,10 @@ import org.openqa.selenium.NoSuchElementException;
 import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.WebElement;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.IdentityHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 
 /**
  * High-level Intentium entry point for Selenium WebDriver.
- * <p>
- * Responsibilities:
- * <ul>
- *   <li>Resolve a human intent phrase to an {@link IntentRole}</li>
- *   <li>Collect DOM candidates via {@link WebDriverDomMapper}</li>
- *   <li>Select the best candidate via {@link ElementSelector}</li>
- *   <li>Optionally log XPath/CSS via {@link ResolvedElementLogger}</li>
- *   <li>Optionally verify XPath/CSS consistency</li>
- * </ul>
  */
 public class IntentiumWebDriver {
 
@@ -48,7 +34,6 @@ public class IntentiumWebDriver {
      *   <li>Ordered list of {@link DomElementInfo} candidates</li>
      *   <li>Identity-based mapping DomElementInfo instance -> WebElement</li>
      * </ul>
-     * This avoids silent candidate de-duplication when {@link DomElementInfo#equals(Object)} matches.
      */
     static final class CandidatesSnapshot {
         final List<DomElementInfo> domCandidates;
@@ -123,25 +108,16 @@ public class IntentiumWebDriver {
 
     // ----------- configuration (low-level) -----------
 
-    /**
-     * Sets a custom logger implementation for resolved elements.
-     */
     public IntentiumWebDriver withLogger(ResolvedElementLogger logger) {
         this.resolvedElementLogger = logger;
         return this;
     }
 
-    /**
-     * Enables stdout logging using a built-in {@link StdOutResolvedElementLogger}.
-     */
     public IntentiumWebDriver withLoggingToStdOut(LocatorLogDetail detail) {
         this.resolvedElementLogger = new StdOutResolvedElementLogger(detail);
         return this;
     }
 
-    /**
-     * Enables or disables XPath/CSS consistency checks for this instance.
-     */
     public IntentiumWebDriver withConsistencyCheck(boolean enabled) {
         this.consistencyCheckEnabled = enabled;
         return this;
@@ -149,32 +125,20 @@ public class IntentiumWebDriver {
 
     // ----------- configuration (sugar, minimal set) -----------
 
-    /**
-     * Sugar: enables stdout logging of both XPath and CSS.
-     */
     public IntentiumWebDriver logLocators() {
         return withLoggingToStdOut(LocatorLogDetail.BOTH);
     }
 
-    /**
-     * Sugar: disables locator logging.
-     */
     public IntentiumWebDriver disableLocatorLogging() {
         this.resolvedElementLogger = null;
         return this;
     }
 
-    /**
-     * Sugar: enables consistency checks.
-     */
     public IntentiumWebDriver checkLocators() {
         this.consistencyCheckEnabled = true;
         return this;
     }
 
-    /**
-     * Sugar: disables consistency checks.
-     */
     public IntentiumWebDriver disableLocatorChecks() {
         this.consistencyCheckEnabled = false;
         return this;
@@ -193,18 +157,10 @@ public class IntentiumWebDriver {
         this.resolvedElementLogger = logger;
     }
 
-    /**
-     * Current URL helper for chain snapshot invalidation.
-     */
     String currentUrl() {
         return driver.getCurrentUrl();
     }
 
-    /**
-     * Collects DOM candidates once.
-     * <p>
-     * Package-private for chain-level caching.
-     */
     CandidatesSnapshot collectCandidatesSnapshot() {
         List<WebDriverDomMapper.Candidate> pairs = domMapper.collectCandidateList();
         if (pairs.isEmpty()) {
@@ -223,64 +179,38 @@ public class IntentiumWebDriver {
         return new CandidatesSnapshot(domCandidates, elementsByInfo);
     }
 
-    /**
-     * Backward-compatible view as a map.
-     * <p>
-     * Uses identity semantics to avoid silent collisions.
-     */
     Map<DomElementInfo, WebElement> collectCandidates() {
         return collectCandidatesSnapshot().elementsByInfo;
     }
 
     // ----------- main API -----------
 
-    /**
-     * Resolves an intent phrase to a WebElement on the current page.
-     */
     public WebElement findElement(String intentPhrase) {
         return resolveIntent(intentPhrase, false).element;
     }
 
-    /**
-     * Convenience: resolves by intent and clicks.
-     */
     public void click(String intentPhrase) {
         resolveIntent(intentPhrase, false).element.click();
     }
 
-    /**
-     * Convenience: resolves by intent and sends keys.
-     */
     public void sendKeys(String intentPhrase, CharSequence... keys) {
         resolveIntent(intentPhrase, false).element.sendKeys(keys);
     }
 
-    /**
-     * Returns an XPath for the resolved element.
-     */
     public String getXPath(String intentPhrase) {
         ResolvedElement r = resolveIntent(intentPhrase, true);
         return r.xPath;
     }
 
-    /**
-     * Returns a CSS selector for the resolved element.
-     */
     public String getCssSelector(String intentPhrase) {
         ResolvedElement r = resolveIntent(intentPhrase, true);
         return r.cssSelector;
     }
 
-    /**
-     * Starts a single-intent action helper.
-     */
     public SingleIntentAction into(String intentPhrase) {
         return new SingleIntentAction(this, intentPhrase);
     }
 
-    /**
-     * Starts an action chain DSL.
-     */
     public ActionsChain actionsChain() {
         return new ActionsChain(this);
     }
@@ -351,98 +281,441 @@ public class IntentiumWebDriver {
         return resolveIntent(intentPhrase, snapshot, forceLocators);
     }
 
-    // ----------- locator builders (v0.1+) -----------
+    // ----------- locator builders (P.3 hardened) -----------
 
     String buildStableXPath(DomElementInfo info, WebElement element, CandidatesSnapshot snapshot) {
         String tag = safeTagName(info, element);
+
+        FormContext form = resolveFormContext(element);
+        String formKey = safe(form.identifier());
 
         String id = safe(info == null ? null : info.getId());
         if (!id.isBlank()) {
             return "//*[@id=" + xpathLiteral(id) + "]";
         }
 
-        String name = safe(info == null ? null : info.getName());
-        if (isUnique(snapshot, tag, DomElementInfo::getName, name)) {
-            return "//" + tag + "[@name=" + xpathLiteral(name) + "]";
-        }
-
-        String aria = safe(info == null ? null : info.getAriaLabel());
-        if (isUnique(snapshot, tag, DomElementInfo::getAriaLabel, aria)) {
-            return "//" + tag + "[@aria-label=" + xpathLiteral(aria) + "]";
-        }
-
-        String placeholder = safe(info == null ? null : info.getPlaceholder());
-        if (isUnique(snapshot, tag, DomElementInfo::getPlaceholder, placeholder)) {
-            return "//" + tag + "[@placeholder=" + xpathLiteral(placeholder) + "]";
-        }
-
-        String title = safe(info == null ? null : info.getTitle());
-        if (isUnique(snapshot, tag, DomElementInfo::getTitle, title)) {
-            return "//" + tag + "[@title=" + xpathLiteral(title) + "]";
-        }
-
-        // Slightly stronger fallback: add @type when present.
         String type = safe(info == null ? null : info.getType());
-        if (isUnique(snapshot, tag, DomElementInfo::getName, name, DomElementInfo::getType, type)) {
-            return "//" + tag + "[@name=" + xpathLiteral(name) + " and @type=" + xpathLiteral(type) + "]";
+        String name = safe(info == null ? null : info.getName());
+        String aria = safe(info == null ? null : info.getAriaLabel());
+        String placeholder = safe(info == null ? null : info.getPlaceholder());
+        String title = safe(info == null ? null : info.getTitle());
+        String label = normalizeText(safe(info == null ? null : info.getLabelText()));
+        String cssClasses = safe(info == null ? null : info.getCssClasses());
+
+        // 1) Unique single-attribute in context (tag + form)
+        if (isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getName, name)) {
+            return xPathWithFormPrefix(form, "//" + tag + "[@name=" + xpathLiteral(name) + "]");
         }
-        if (isUnique(snapshot, tag, DomElementInfo::getAriaLabel, aria, DomElementInfo::getType, type)) {
-            return "//" + tag + "[@aria-label=" + xpathLiteral(aria) + " and @type=" + xpathLiteral(type) + "]";
+        if (isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getAriaLabel, aria)) {
+            return xPathWithFormPrefix(form, "//" + tag + "[@aria-label=" + xpathLiteral(aria) + "]");
         }
-        if (isUnique(snapshot, tag, DomElementInfo::getPlaceholder, placeholder, DomElementInfo::getType, type)) {
-            return "//" + tag + "[@placeholder=" + xpathLiteral(placeholder) + " and @type=" + xpathLiteral(type) + "]";
+        if (isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getPlaceholder, placeholder)) {
+            return xPathWithFormPrefix(form, "//" + tag + "[@placeholder=" + xpathLiteral(placeholder) + "]");
         }
-        if (isUnique(snapshot, tag, DomElementInfo::getTitle, title, DomElementInfo::getType, type)) {
-            return "//" + tag + "[@title=" + xpathLiteral(title) + " and @type=" + xpathLiteral(type) + "]";
+        if (isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getTitle, title)) {
+            return xPathWithFormPrefix(form, "//" + tag + "[@title=" + xpathLiteral(title) + "]");
         }
 
-        return "//" + tag;
+        // 2) Unique attribute + type (slightly stronger)
+        if (isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getName, name, DomElementInfo::getType, type)) {
+            return xPathWithFormPrefix(form, "//" + tag +
+                    "[@name=" + xpathLiteral(name) + " and @type=" + xpathLiteral(type) + "]");
+        }
+        if (isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getAriaLabel, aria, DomElementInfo::getType, type)) {
+            return xPathWithFormPrefix(form, "//" + tag +
+                    "[@aria-label=" + xpathLiteral(aria) + " and @type=" + xpathLiteral(type) + "]");
+        }
+        if (isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getPlaceholder, placeholder, DomElementInfo::getType, type)) {
+            return xPathWithFormPrefix(form, "//" + tag +
+                    "[@placeholder=" + xpathLiteral(placeholder) + " and @type=" + xpathLiteral(type) + "]");
+        }
+        if (isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getTitle, title, DomElementInfo::getType, type)) {
+            return xPathWithFormPrefix(form, "//" + tag +
+                    "[@title=" + xpathLiteral(title) + " and @type=" + xpathLiteral(type) + "]");
+        }
+
+        // 3) Unique single class token (exact token match)
+        String classToken = pickUniqueClassToken(snapshot, tag, formKey, cssClasses);
+        if (classToken != null) {
+            String classPredicate = "contains(concat(' ', normalize-space(@class), ' '), " +
+                    xpathLiteral(" " + classToken + " ") + ")";
+            return xPathWithFormPrefix(form, "//" + tag + "[" + classPredicate + "]");
+        }
+
+        // 4) Label-based XPath (best-effort; can be very good for forms)
+        if (!label.isBlank()) {
+            String labelXPath = "//label[normalize-space(.)=" + xpathLiteral(label) + "]/following::" + tag + "[1]";
+            return xPathWithFormPrefix(form, labelXPath);
+        }
+
+        // 5) Positional fallback for XPath (still better than //tag)
+        String base = "//" + tag;
+        if (!type.isBlank() && "input".equalsIgnoreCase(tag)) {
+            base = base + "[@type=" + xpathLiteral(type) + "]";
+        }
+
+        int ordinal = ordinalInContext(snapshot, info, tag, formKey, type);
+        if (ordinal > 0) {
+            return xPathWithFormPrefix(form, "(" + base + ")[" + ordinal + "]");
+        }
+
+        // Absolute last resort
+        return xPathWithFormPrefix(form, "//" + tag);
     }
 
     String buildStableCssSelector(DomElementInfo info, WebElement element, CandidatesSnapshot snapshot) {
         String tag = safeTagName(info, element);
+
+        FormContext form = resolveFormContext(element);
+        String formKey = safe(form.identifier());
 
         String id = safe(info == null ? null : info.getId());
         if (!id.isBlank()) {
             return "#" + cssEscapeIdentifier(id);
         }
 
-        String name = safe(info == null ? null : info.getName());
-        if (isUnique(snapshot, tag, DomElementInfo::getName, name)) {
-            return tag + "[name=" + cssAttrLiteral(name) + "]";
-        }
-
-        String aria = safe(info == null ? null : info.getAriaLabel());
-        if (isUnique(snapshot, tag, DomElementInfo::getAriaLabel, aria)) {
-            return tag + "[aria-label=" + cssAttrLiteral(aria) + "]";
-        }
-
-        String placeholder = safe(info == null ? null : info.getPlaceholder());
-        if (isUnique(snapshot, tag, DomElementInfo::getPlaceholder, placeholder)) {
-            return tag + "[placeholder=" + cssAttrLiteral(placeholder) + "]";
-        }
-
-        String title = safe(info == null ? null : info.getTitle());
-        if (isUnique(snapshot, tag, DomElementInfo::getTitle, title)) {
-            return tag + "[title=" + cssAttrLiteral(title) + "]";
-        }
-
         String type = safe(info == null ? null : info.getType());
-        if (isUnique(snapshot, tag, DomElementInfo::getName, name, DomElementInfo::getType, type)) {
-            return tag + "[name=" + cssAttrLiteral(name) + "][type=" + cssAttrLiteral(type) + "]";
+        String name = safe(info == null ? null : info.getName());
+        String aria = safe(info == null ? null : info.getAriaLabel());
+        String placeholder = safe(info == null ? null : info.getPlaceholder());
+        String title = safe(info == null ? null : info.getTitle());
+        String cssClasses = safe(info == null ? null : info.getCssClasses());
+
+        // 1) Unique single-attribute in context (tag + form)
+        if (isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getName, name)) {
+            return cssWithFormPrefix(form, tag + "[name=" + cssAttrLiteral(name) + "]");
         }
-        if (isUnique(snapshot, tag, DomElementInfo::getAriaLabel, aria, DomElementInfo::getType, type)) {
-            return tag + "[aria-label=" + cssAttrLiteral(aria) + "][type=" + cssAttrLiteral(type) + "]";
+        if (isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getAriaLabel, aria)) {
+            return cssWithFormPrefix(form, tag + "[aria-label=" + cssAttrLiteral(aria) + "]");
         }
-        if (isUnique(snapshot, tag, DomElementInfo::getPlaceholder, placeholder, DomElementInfo::getType, type)) {
-            return tag + "[placeholder=" + cssAttrLiteral(placeholder) + "][type=" + cssAttrLiteral(type) + "]";
+        if (isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getPlaceholder, placeholder)) {
+            return cssWithFormPrefix(form, tag + "[placeholder=" + cssAttrLiteral(placeholder) + "]");
         }
-        if (isUnique(snapshot, tag, DomElementInfo::getTitle, title, DomElementInfo::getType, type)) {
-            return tag + "[title=" + cssAttrLiteral(title) + "][type=" + cssAttrLiteral(type) + "]";
+        if (isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getTitle, title)) {
+            return cssWithFormPrefix(form, tag + "[title=" + cssAttrLiteral(title) + "]");
         }
 
-        return tag;
+        // 2) Unique attribute + type
+        if (isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getName, name, DomElementInfo::getType, type)) {
+            return cssWithFormPrefix(form, tag +
+                    "[name=" + cssAttrLiteral(name) + "][type=" + cssAttrLiteral(type) + "]");
+        }
+        if (isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getAriaLabel, aria, DomElementInfo::getType, type)) {
+            return cssWithFormPrefix(form, tag +
+                    "[aria-label=" + cssAttrLiteral(aria) + "][type=" + cssAttrLiteral(type) + "]");
+        }
+        if (isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getPlaceholder, placeholder, DomElementInfo::getType, type)) {
+            return cssWithFormPrefix(form, tag +
+                    "[placeholder=" + cssAttrLiteral(placeholder) + "][type=" + cssAttrLiteral(type) + "]");
+        }
+        if (isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getTitle, title, DomElementInfo::getType, type)) {
+            return cssWithFormPrefix(form, tag +
+                    "[title=" + cssAttrLiteral(title) + "][type=" + cssAttrLiteral(type) + "]");
+        }
+
+        // 3) Unique single class token
+        String classToken = pickUniqueClassToken(snapshot, tag, formKey, cssClasses);
+        if (classToken != null) {
+            return cssWithFormPrefix(form, tag + "." + cssEscapeClassToken(classToken));
+        }
+
+        // 4) Best-effort fallback: tag + type (if it reduces ambiguity)
+        if (!type.isBlank() && isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getType, type)) {
+            return cssWithFormPrefix(form, tag + "[type=" + cssAttrLiteral(type) + "]");
+        }
+
+        // Absolute last resort
+        return cssWithFormPrefix(form, tag);
     }
+
+    // ----------- context helpers -----------
+
+    private static final class FormContext {
+        static final FormContext NONE = new FormContext("", "");
+        final String id;
+        final String name;
+
+        FormContext(String id, String name) {
+            this.id = id == null ? "" : id;
+            this.name = name == null ? "" : name;
+        }
+
+        String identifier() {
+            if (!id.isBlank()) {
+                return id;
+            }
+            return name;
+        }
+    }
+
+    private FormContext resolveFormContext(WebElement element) {
+        try {
+            WebElement form = element.findElement(By.xpath("ancestor::form[1]"));
+            String id = safe(form.getAttribute("id"));
+            String name = safe(form.getAttribute("name"));
+            if (id.isBlank() && name.isBlank()) {
+                return FormContext.NONE;
+            }
+            return new FormContext(id, name);
+        } catch (Exception e) {
+            return FormContext.NONE;
+        }
+    }
+
+    private String xPathWithFormPrefix(FormContext form, String xPath) {
+        if (form == null || form == FormContext.NONE) {
+            return xPath;
+        }
+        if (!form.id.isBlank()) {
+            return "//form[@id=" + xpathLiteral(form.id) + "]" + ensureStartsWithDoubleSlash(xPath);
+        }
+        if (!form.name.isBlank()) {
+            return "//form[@name=" + xpathLiteral(form.name) + "]" + ensureStartsWithDoubleSlash(xPath);
+        }
+        return xPath;
+    }
+
+    private String cssWithFormPrefix(FormContext form, String css) {
+        if (form == null || form == FormContext.NONE) {
+            return css;
+        }
+        if (!form.id.isBlank()) {
+            return "form#" + cssEscapeIdentifier(form.id) + " " + css;
+        }
+        if (!form.name.isBlank()) {
+            return "form[name=" + cssAttrLiteral(form.name) + "] " + css;
+        }
+        return css;
+    }
+
+    private String ensureStartsWithDoubleSlash(String xPath) {
+        if (xPath == null || xPath.isBlank()) {
+            return "";
+        }
+        if (xPath.startsWith("//")) {
+            return xPath;
+        }
+        if (xPath.startsWith("/")) {
+            return "/" + xPath;
+        }
+        return "//" + xPath;
+    }
+
+    // ----------- uniqueness helpers -----------
+
+    @FunctionalInterface
+    private interface ValueGetter {
+        String get(DomElementInfo info);
+    }
+
+    private boolean isUniqueInContext(
+            CandidatesSnapshot snapshot,
+            String tag,
+            String formIdentifier,
+            ValueGetter getter,
+            String value
+    ) {
+        if (snapshot == null || snapshot.domCandidates == null) {
+            return false;
+        }
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        int count = 0;
+        for (DomElementInfo d : snapshot.domCandidates) {
+            if (d == null) {
+                continue;
+            }
+            if (!tagEquals(tag, safe(d.getTagName()))) {
+                continue;
+            }
+            if (!formMatches(formIdentifier, safe(d.getFormIdentifier()))) {
+                continue;
+            }
+            if (value.equals(safe(getter.get(d)))) {
+                count++;
+                if (count > 1) {
+                    return false;
+                }
+            }
+        }
+        return count == 1;
+    }
+
+    private boolean isUniqueInContext(
+            CandidatesSnapshot snapshot,
+            String tag,
+            String formIdentifier,
+            ValueGetter getter1,
+            String value1,
+            ValueGetter getter2,
+            String value2
+    ) {
+        if (snapshot == null || snapshot.domCandidates == null) {
+            return false;
+        }
+        if (value1 == null || value1.isBlank() || value2 == null || value2.isBlank()) {
+            return false;
+        }
+        int count = 0;
+        for (DomElementInfo d : snapshot.domCandidates) {
+            if (d == null) {
+                continue;
+            }
+            if (!tagEquals(tag, safe(d.getTagName()))) {
+                continue;
+            }
+            if (!formMatches(formIdentifier, safe(d.getFormIdentifier()))) {
+                continue;
+            }
+            if (value1.equals(safe(getter1.get(d))) && value2.equals(safe(getter2.get(d)))) {
+                count++;
+                if (count > 1) {
+                    return false;
+                }
+            }
+        }
+        return count == 1;
+    }
+
+    private boolean formMatches(String expected, String actual) {
+        if (expected == null || expected.isBlank()) {
+            return actual == null || actual.isBlank();
+        }
+        return expected.equals(actual);
+    }
+
+    private int ordinalInContext(
+            CandidatesSnapshot snapshot,
+            DomElementInfo target,
+            String tag,
+            String formIdentifier,
+            String type
+    ) {
+        if (snapshot == null || snapshot.domCandidates == null || target == null) {
+            return -1;
+        }
+
+        int ordinal = 0;
+        for (DomElementInfo d : snapshot.domCandidates) {
+            if (d == null) {
+                continue;
+            }
+            if (!tagEquals(tag, safe(d.getTagName()))) {
+                continue;
+            }
+            if (!formMatches(formIdentifier, safe(d.getFormIdentifier()))) {
+                continue;
+            }
+
+            if (!type.isBlank() && "input".equalsIgnoreCase(tag)) {
+                if (!type.equals(safe(d.getType()))) {
+                    continue;
+                }
+            }
+
+            ordinal++;
+            if (d == target) {
+                return ordinal;
+            }
+        }
+        return -1;
+    }
+
+    private String pickUniqueClassToken(CandidatesSnapshot snapshot, String tag, String formIdentifier, String cssClasses) {
+        if (snapshot == null || snapshot.domCandidates == null) {
+            return null;
+        }
+        if (cssClasses == null || cssClasses.isBlank()) {
+            return null;
+        }
+
+        String[] tokens = cssClasses.trim().split("\\s+");
+        for (String token : tokens) {
+            if (token == null || token.isBlank()) {
+                continue;
+            }
+            if (isUniqueClassTokenInContext(snapshot, tag, formIdentifier, token)) {
+                return token;
+            }
+        }
+        return null;
+    }
+
+    private boolean isUniqueClassTokenInContext(
+            CandidatesSnapshot snapshot,
+            String tag,
+            String formIdentifier,
+            String classToken
+    ) {
+        if (classToken == null || classToken.isBlank()) {
+            return false;
+        }
+        int count = 0;
+        for (DomElementInfo d : snapshot.domCandidates) {
+            if (d == null) {
+                continue;
+            }
+            if (!tagEquals(tag, safe(d.getTagName()))) {
+                continue;
+            }
+            if (!formMatches(formIdentifier, safe(d.getFormIdentifier()))) {
+                continue;
+            }
+            if (hasClassToken(safe(d.getCssClasses()), classToken)) {
+                count++;
+                if (count > 1) {
+                    return false;
+                }
+            }
+        }
+        return count == 1;
+    }
+
+    private boolean hasClassToken(String cssClasses, String token) {
+        if (cssClasses == null || cssClasses.isBlank() || token == null || token.isBlank()) {
+            return false;
+        }
+        String[] tokens = cssClasses.trim().split("\\s+");
+        for (String t : tokens) {
+            if (token.equals(t)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // ----------- old builders kept (v0.1) -----------
+
+    String buildSimpleXPath(WebElement element) {
+        String id = element.getAttribute("id");
+        if (id != null && !id.isBlank()) {
+            return "//*[@id=" + xpathLiteral(id) + "]";
+        }
+
+        String name = element.getAttribute("name");
+        if (name != null && !name.isBlank()) {
+            return "//" + element.getTagName() + "[@name=" + xpathLiteral(name) + "]";
+        }
+
+        return "//" + element.getTagName();
+    }
+
+    String buildSimpleCssSelector(WebElement element) {
+        String id = element.getAttribute("id");
+        if (id != null && !id.isBlank()) {
+            return "#" + cssEscapeIdentifier(id);
+        }
+
+        String name = element.getAttribute("name");
+        if (name != null && !name.isBlank()) {
+            return element.getTagName() + "[name=" + cssAttrLiteral(name) + "]";
+        }
+
+        return element.getTagName();
+    }
+
+    // ----------- misc helpers -----------
 
     private String safeTagName(DomElementInfo info, WebElement element) {
         String tag = safe(info == null ? null : info.getTagName());
@@ -461,80 +734,15 @@ public class IntentiumWebDriver {
         return value == null ? "" : value;
     }
 
-    private boolean isUnique(
-            CandidatesSnapshot snapshot,
-            String tag,
-            ValueGetter getter,
-            String value
-    ) {
-        if (snapshot == null || snapshot.domCandidates == null) {
-            return false;
+    private String normalizeText(String value) {
+        if (value == null) {
+            return "";
         }
-        if (value == null || value.isBlank()) {
-            return false;
-        }
-
-        int count = 0;
-        for (DomElementInfo d : snapshot.domCandidates) {
-            if (d == null) {
-                continue;
-            }
-            if (!tagEquals(tag, d.getTagName())) {
-                continue;
-            }
-            if (value.equals(getter.get(d))) {
-                count++;
-                if (count > 1) {
-                    return false;
-                }
-            }
-        }
-        return count == 1;
-    }
-
-    private boolean isUnique(
-            CandidatesSnapshot snapshot,
-            String tag,
-            ValueGetter getter1,
-            String value1,
-            ValueGetter getter2,
-            String value2
-    ) {
-        if (snapshot == null || snapshot.domCandidates == null) {
-            return false;
-        }
-        if (value1 == null || value1.isBlank() || value2 == null || value2.isBlank()) {
-            return false;
-        }
-
-        int count = 0;
-        for (DomElementInfo d : snapshot.domCandidates) {
-            if (d == null) {
-                continue;
-            }
-            if (!tagEquals(tag, d.getTagName())) {
-                continue;
-            }
-            if (value1.equals(getter1.get(d)) && value2.equals(getter2.get(d))) {
-                count++;
-                if (count > 1) {
-                    return false;
-                }
-            }
-        }
-        return count == 1;
+        return value.trim().replaceAll("\\s+", " ");
     }
 
     private boolean tagEquals(String a, String b) {
-        if (a == null || b == null) {
-            return false;
-        }
-        return a.equalsIgnoreCase(b);
-    }
-
-    @FunctionalInterface
-    private interface ValueGetter {
-        String get(DomElementInfo info);
+        return a != null && b != null && a.equalsIgnoreCase(b);
     }
 
     private String xpathLiteral(String value) {
@@ -581,6 +789,11 @@ public class IntentiumWebDriver {
             }
         }
         return sb.toString();
+    }
+
+    private String cssEscapeClassToken(String token) {
+        // For class tokens we can keep it simple – they normally match [-_a-zA-Z0-9].
+        return cssEscapeIdentifier(token);
     }
 
     // ----------- consistency check -----------
