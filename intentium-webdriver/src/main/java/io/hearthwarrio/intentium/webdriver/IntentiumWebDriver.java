@@ -221,17 +221,96 @@ public class IntentiumWebDriver {
     }
 
     /**
-     * p.4: uses last-resolve cache to avoid second DOM pass if getXPath() preceded.
+     * p.4: uses last-resolve cache to avoid second DOM pass if getXPath() was already called.
      */
     public String getCssSelector(String intentPhrase) {
         ResolvedElement r = resolveIntent(intentPhrase, true);
         return r.cssSelector;
     }
 
+    /** Starts a single-intent action helper. */
     public SingleIntentAction into(String intentPhrase) {
         return new SingleIntentAction(this, intentPhrase);
     }
 
+    /** Alias for {@link #into(String)}. */
+    public SingleIntentAction at(String intentPhrase) {
+        return into(intentPhrase);
+    }
+
+// ----------- PageObject / manual locator bridge -----------
+
+    /**
+     * Resolve an element using a manual Selenium {@link By} locator.
+     * <p>
+     * Useful as a bridge for existing PageObjects: you can keep your locators,
+     * but still use Intentium DSL, logging and optional consistency checks.
+     */
+    public WebElement findElement(By by) {
+        return resolveBy(by, false).element;
+    }
+
+    public void click(By by) {
+        resolveBy(by, false).element.click();
+    }
+
+    public void sendKeys(By by, CharSequence... keys) {
+        resolveBy(by, false).element.sendKeys(keys);
+    }
+
+    public String getXPath(By by) {
+        return resolveBy(by, true).xPath;
+    }
+
+    public String getCssSelector(By by) {
+        return resolveBy(by, true).cssSelector;
+    }
+
+    public SingleTargetAction into(By by) {
+        return new SingleTargetAction(this, by);
+    }
+
+    public SingleTargetAction at(By by) {
+        return into(by);
+    }
+
+    /**
+     * Resolve / act on an existing {@link WebElement} reference (e.g. from PageFactory).
+     * <p>
+     * Best-effort behavior:
+     * - If the element is a PageFactory proxy and Intentium can extract the underlying {@link By},
+     *   Intentium will prefer that {@link By} for logging and consistency checks.
+     * - Otherwise Intentium will operate on the provided element and build derived XPath/CSS.
+     */
+    public WebElement findElement(WebElement element) {
+        return resolveWebElement(element, false).element;
+    }
+
+    public void click(WebElement element) {
+        resolveWebElement(element, false).element.click();
+    }
+
+    public void sendKeys(WebElement element, CharSequence... keys) {
+        resolveWebElement(element, false).element.sendKeys(keys);
+    }
+
+    public String getXPath(WebElement element) {
+        return resolveWebElement(element, true).xPath;
+    }
+
+    public String getCssSelector(WebElement element) {
+        return resolveWebElement(element, true).cssSelector;
+    }
+
+    public SingleTargetAction into(WebElement element) {
+        return new SingleTargetAction(this, element);
+    }
+
+    public SingleTargetAction at(WebElement element) {
+        return into(element);
+    }
+
+    /** Starts an action chain DSL. */
     public ActionsChain actionsChain() {
         return new ActionsChain(this);
     }
@@ -345,7 +424,214 @@ public class IntentiumWebDriver {
         lastLocatorsCache.resolved = resolved;
     }
 
-    // ----------- locator builders (P.3 hardened) -----------
+    // ----------- PageObject / manual target resolve -----------
+
+    enum ManualByKind {
+        XPATH,
+        CSS,
+        OTHER
+    }
+
+    static final class ManualByInfo {
+        final ManualByKind kind;
+        final String value;
+
+        ManualByInfo(ManualByKind kind, String value) {
+            this.kind = kind;
+            this.value = value;
+        }
+    }
+
+    ResolvedElement resolveBy(By by, boolean forceLocators) {
+        Objects.requireNonNull(by, "by must not be null");
+        return resolveByInternal(by.toString(), by, forceLocators);
+    }
+
+    ResolvedElement resolveWebElement(WebElement element, boolean forceLocators) {
+        Objects.requireNonNull(element, "element must not be null");
+
+        By extracted = PageFactoryByExtractor.tryExtractBy(element);
+        if (extracted != null) {
+            // Best-effort: treat PageFactory proxies as manual By targets when possible.
+            return resolveByInternal("PageObject(" + extracted + ")", extracted, forceLocators);
+        }
+
+        boolean needLocators = forceLocators || resolvedElementLogger != null || consistencyCheckEnabled;
+
+        DomElementInfo elementInfo = domMapper.toDomElementInfo(element);
+
+        String xPath = null;
+        String css = null;
+        if (needLocators) {
+            xPath = buildQuickXPath(elementInfo, element);
+            css = buildQuickCssSelector(elementInfo, element);
+        }
+
+        if (resolvedElementLogger != null) {
+            resolvedElementLogger.logResolvedElement("WebElement", null, xPath, css, elementInfo);
+        }
+
+        if (consistencyCheckEnabled) {
+            runConsistencyCheck("WebElement", null, element, xPath, css);
+        }
+
+        return new ResolvedElement("WebElement", null, elementInfo, element, xPath, css);
+    }
+
+    private ResolvedElement resolveByInternal(String phrase, By by, boolean forceLocators) {
+        boolean needLocators = forceLocators || resolvedElementLogger != null || consistencyCheckEnabled;
+
+        WebElement element = driver.findElement(by);
+        DomElementInfo elementInfo = domMapper.toDomElementInfo(element);
+
+        String xPath = null;
+        String css = null;
+
+        if (needLocators) {
+            ManualByInfo info = parseManualBy(by);
+
+            if (info.kind == ManualByKind.XPATH) {
+                xPath = info.value;
+                css = buildQuickCssSelector(elementInfo, element);
+            } else if (info.kind == ManualByKind.CSS) {
+                css = info.value;
+                xPath = buildQuickXPath(elementInfo, element);
+            } else {
+                xPath = buildQuickXPath(elementInfo, element);
+                css = buildQuickCssSelector(elementInfo, element);
+            }
+        }
+
+        if (resolvedElementLogger != null) {
+            resolvedElementLogger.logResolvedElement(phrase, null, xPath, css, elementInfo);
+        }
+
+        if (consistencyCheckEnabled) {
+            runConsistencyCheck(phrase, null, element, xPath, css);
+        }
+
+        return new ResolvedElement(phrase, null, elementInfo, element, xPath, css);
+    }
+
+    private ManualByInfo parseManualBy(By by) {
+        String s = String.valueOf(by);
+        if (s.startsWith("By.xpath: ")) {
+            return new ManualByInfo(ManualByKind.XPATH, s.substring("By.xpath: ".length()));
+        }
+        if (s.startsWith("By.cssSelector: ")) {
+            return new ManualByInfo(ManualByKind.CSS, s.substring("By.cssSelector: ".length()));
+        }
+        return new ManualByInfo(ManualByKind.OTHER, s);
+    }
+
+    /**
+     * "Quick" locator builders for manual targets (By/WebElement).
+     * <p>
+     * Goal: avoid collecting full DOM candidates snapshot for PageObject bridging,
+     * but still produce reasonably stable XPath/CSS for logging/diagnostics.
+     * <p>
+     * Important: any non-trivial locator produced here is verified for uniqueness via
+     * {@code driver.findElements(...).size() == 1}. If not unique, we fall back to a generic locator,
+     * which makes consistency checks skip safely.
+     */
+    private String buildQuickXPath(DomElementInfo info, WebElement element) {
+        String tag = safeTagName(info, element);
+
+        String id = safe(info == null ? null : info.getId());
+        if (!id.isBlank()) {
+            return "//*[@id=" + xpathLiteral(id) + "]";
+        }
+
+        String name = safe(info == null ? null : info.getName());
+        if (!name.isBlank()) {
+            String candidate = "//" + tag + "[@name=" + xpathLiteral(name) + "]";
+            if (isUnique(By.xpath(candidate))) {
+                return candidate;
+            }
+        }
+
+        String aria = safe(info == null ? null : info.getAriaLabel());
+        if (!aria.isBlank()) {
+            String candidate = "//" + tag + "[@aria-label=" + xpathLiteral(aria) + "]";
+            if (isUnique(By.xpath(candidate))) {
+                return candidate;
+            }
+        }
+
+        String placeholder = safe(info == null ? null : info.getPlaceholder());
+        if (!placeholder.isBlank()) {
+            String candidate = "//" + tag + "[@placeholder=" + xpathLiteral(placeholder) + "]";
+            if (isUnique(By.xpath(candidate))) {
+                return candidate;
+            }
+        }
+
+        String title = safe(info == null ? null : info.getTitle());
+        if (!title.isBlank()) {
+            String candidate = "//" + tag + "[@title=" + xpathLiteral(title) + "]";
+            if (isUnique(By.xpath(candidate))) {
+                return candidate;
+            }
+        }
+
+        // generic fallback
+        return "//" + tag;
+    }
+
+    private String buildQuickCssSelector(DomElementInfo info, WebElement element) {
+        String tag = safeTagName(info, element);
+
+        String id = safe(info == null ? null : info.getId());
+        if (!id.isBlank()) {
+            return "#" + cssEscapeIdentifier(id);
+        }
+
+        String name = safe(info == null ? null : info.getName());
+        if (!name.isBlank()) {
+            String candidate = tag + "[name=" + cssAttrLiteral(name) + "]";
+            if (isUnique(By.cssSelector(candidate))) {
+                return candidate;
+            }
+        }
+
+        String aria = safe(info == null ? null : info.getAriaLabel());
+        if (!aria.isBlank()) {
+            String candidate = tag + "[aria-label=" + cssAttrLiteral(aria) + "]";
+            if (isUnique(By.cssSelector(candidate))) {
+                return candidate;
+            }
+        }
+
+        String placeholder = safe(info == null ? null : info.getPlaceholder());
+        if (!placeholder.isBlank()) {
+            String candidate = tag + "[placeholder=" + cssAttrLiteral(placeholder) + "]";
+            if (isUnique(By.cssSelector(candidate))) {
+                return candidate;
+            }
+        }
+
+        String title = safe(info == null ? null : info.getTitle());
+        if (!title.isBlank()) {
+            String candidate = tag + "[title=" + cssAttrLiteral(title) + "]";
+            if (isUnique(By.cssSelector(candidate))) {
+                return candidate;
+            }
+        }
+
+        // generic fallback
+        return tag;
+    }
+
+    private boolean isUnique(By by) {
+        try {
+            return driver.findElements(by).size() == 1;
+        } catch (RuntimeException e) {
+            // invalid selector or driver quirks: just treat as non-unique
+            return false;
+        }
+    }
+
+    // ----------- locator builders -----------
 
     String buildStableXPath(DomElementInfo info, WebElement element, CandidatesSnapshot snapshot) {
         String tag = safeTagName(info, element);
