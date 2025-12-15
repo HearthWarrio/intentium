@@ -3,14 +3,18 @@ package io.hearthwarrio.intentium.core;
 import java.util.Locale;
 
 /**
- * Naive v0.1 implementation of semantic scoring for login forms.
+ * Naive semantic scoring for login forms.
  *
- * It uses:
- * - tag name and type
- * - label / placeholder / aria-label / title
- * - simple keyword matching in RU/EN
+ * v0.2 (P.5):
+ * – supports broader candidate tags: textarea, select, a, role widgets, contenteditable
+ * – reduces noise from hidden inputs
  */
 public class DefaultElementScorer implements ElementScorer {
+
+    private static final String HINT_ROLE_BUTTON = "[intentium:role=button]";
+    private static final String HINT_ROLE_TEXTBOX = "[intentium:role=textbox]";
+    private static final String HINT_ROLE_COMBOBOX = "[intentium:role=combobox]";
+    private static final String HINT_CONTENTEDITABLE = "[intentium:contenteditable]";
 
     @Override
     public double score(IntentRole role, DomElementInfo element) {
@@ -32,6 +36,10 @@ public class DefaultElementScorer implements ElementScorer {
         String tag = lower(e.getTagName());
         String type = lower(e.getType());
 
+        if ("input".equals(tag) && "hidden".equals(type)) {
+            return -100.0;
+        }
+
         if ("input".equals(tag)) {
             score += 1.0;
             if (type.isEmpty() || "text".equals(type)) {
@@ -39,6 +47,20 @@ public class DefaultElementScorer implements ElementScorer {
             } else if ("email".equals(type)) {
                 score += 2.0;
             }
+        } else if ("textarea".equals(tag)) {
+            score += 0.5;
+        } else if ("select".equals(tag)) {
+            score += 0.1;
+        } else if ("div".equals(tag) || "span".equals(tag)) {
+            score += 0.1;
+        }
+
+        String surrounding = safe(e.getSurroundingText());
+        if (surrounding.contains(HINT_ROLE_TEXTBOX) || surrounding.contains(HINT_CONTENTEDITABLE)) {
+            score += 1.0;
+        }
+        if (surrounding.contains(HINT_ROLE_COMBOBOX)) {
+            score += 0.5;
         }
 
         String combinedText = join(
@@ -67,8 +89,21 @@ public class DefaultElementScorer implements ElementScorer {
         String tag = lower(e.getTagName());
         String type = lower(e.getType());
 
+        if ("input".equals(tag) && "hidden".equals(type)) {
+            return -100.0;
+        }
+
         if ("input".equals(tag) && "password".equals(type)) {
             score += 4.0;
+        } else if ("input".equals(tag) || "textarea".equals(tag)) {
+            score += 0.5;
+        } else if ("div".equals(tag) || "span".equals(tag)) {
+            score += 0.1;
+        }
+
+        String surrounding = safe(e.getSurroundingText());
+        if (surrounding.contains(HINT_ROLE_TEXTBOX) || surrounding.contains(HINT_CONTENTEDITABLE)) {
+            score += 0.75;
         }
 
         String combinedText = join(
@@ -81,9 +116,7 @@ public class DefaultElementScorer implements ElementScorer {
                 e.getId()
         );
 
-        if (containsAny(combinedText,
-                "password", "pwd",
-                "пароль", "пасс")) {
+        if (containsAny(combinedText, "password", "pwd", "пароль", "пасс")) {
             score += 2.0;
         }
 
@@ -96,11 +129,25 @@ public class DefaultElementScorer implements ElementScorer {
         String tag = lower(e.getTagName());
         String type = lower(e.getType());
 
-        // типы кнопок
+        if ("input".equals(tag) && "hidden".equals(type)) {
+            return -100.0;
+        }
+
         if ("button".equals(tag)) {
             score += 1.0;
         }
         if ("input".equals(tag) && ("submit".equals(type) || "button".equals(type))) {
+            score += 1.0;
+        }
+        if ("a".equals(tag)) {
+            score += 0.5;
+        }
+        if ("div".equals(tag) || "span".equals(tag)) {
+            score += 0.25;
+        }
+
+        String surrounding = safe(e.getSurroundingText());
+        if (surrounding.contains(HINT_ROLE_BUTTON)) {
             score += 1.0;
         }
 
@@ -114,18 +161,16 @@ public class DefaultElementScorer implements ElementScorer {
                 e.getPlaceholder()
         );
 
-        if (containsAny(combinedText,
-                "login", "log in", "sign in",
-                "войти", "вход")) {
+        if (containsAny(combinedText, "login", "log in", "sign in", "войти", "вход")) {
             score += 3.0;
         }
 
         return score;
     }
 
-    /**
-     * Utils
-     */
+    private static String safe(String s) {
+        return s == null ? "" : s;
+    }
 
     private static String lower(String s) {
         return s == null ? "" : s.toLowerCase(Locale.ROOT);
