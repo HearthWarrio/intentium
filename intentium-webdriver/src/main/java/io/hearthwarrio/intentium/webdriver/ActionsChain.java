@@ -1,9 +1,13 @@
 package io.hearthwarrio.intentium.webdriver;
 
-import io.hearthwarrio.intentium.core.DomElementInfo;
+import org.openqa.selenium.By;
 import org.openqa.selenium.WebElement;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.function.Consumer;
 
 /**
@@ -12,15 +16,16 @@ import java.util.function.Consumer;
  * Supports optional overrides for logging and consistency checks at chain level.
  * <p>
  * Per-chain caching:
- * - DOM candidates are collected once per perform()
- * - each intent phrase is resolved once per perform()
- * - cache is invalidated automatically if the current URL changes mid-chain
+ * <ul>
+ *   <li>DOM candidates are collected once per {@link #perform()}</li>
+ *   <li>each target (intent phrase / By / WebElement) is resolved once per perform(), per "need locators" flag</li>
+ * </ul>
  */
 public final class ActionsChain {
 
     private final IntentiumWebDriver intentium;
 
-    private String currentIntent;
+    private TargetRef currentTarget;
 
     private final List<Consumer<ExecutionContext>> steps = new ArrayList<>();
 
@@ -91,10 +96,26 @@ public final class ActionsChain {
     }
 
     /**
-     * Selects the current intent target for subsequent actions.
+     * Selects the current target by intent phrase for subsequent actions.
      */
     public ActionsChain into(String intentPhrase) {
-        this.currentIntent = intentPhrase;
+        this.currentTarget = TargetRef.intent(intentPhrase);
+        return this;
+    }
+
+    /**
+     * Selects the current target by Selenium {@link By} locator for subsequent actions.
+     */
+    public ActionsChain into(By by) {
+        this.currentTarget = TargetRef.by(by);
+        return this;
+    }
+
+    /**
+     * Selects the current target by an existing {@link WebElement} reference for subsequent actions.
+     */
+    public ActionsChain into(WebElement element) {
+        this.currentTarget = TargetRef.element(element);
         return this;
     }
 
@@ -106,20 +127,34 @@ public final class ActionsChain {
     }
 
     /**
-     * Adds a sendKeys step for the current intent.
+     * Alias for {@link #into(By)}.
+     */
+    public ActionsChain at(By by) {
+        return into(by);
+    }
+
+    /**
+     * Alias for {@link #into(WebElement)}.
+     */
+    public ActionsChain at(WebElement element) {
+        return into(element);
+    }
+
+    /**
+     * Adds a sendKeys step for the current target.
      */
     public ActionsChain send(CharSequence... keys) {
-        final String intent = requireCurrentIntent();
-        steps.add(ctx -> ctx.resolve(intent, false).element.sendKeys(keys));
+        final TargetRef target = requireCurrentTarget();
+        steps.add(ctx -> ctx.resolve(target, false).element.sendKeys(keys));
         return this;
     }
 
     /**
-     * Adds a click step for the current intent.
+     * Adds a click step for the current target.
      */
     public ActionsChain click() {
-        final String intent = requireCurrentIntent();
-        steps.add(ctx -> ctx.resolve(intent, false).element.click());
+        final TargetRef target = requireCurrentTarget();
+        steps.add(ctx -> ctx.resolve(target, false).element.click());
         return this;
     }
 
@@ -145,6 +180,8 @@ public final class ActionsChain {
         ResolvedElementLogger originalLogger = intentium.getResolvedElementLogger();
         boolean originalConsistency = intentium.isConsistencyCheckEnabled();
 
+        ExecutionContext ctx = ExecutionContext.create(intentium);
+
         try {
             if (loggerOverrideSpecified) {
                 intentium.setResolvedElementLogger(loggerOverrideValue);
@@ -152,8 +189,6 @@ public final class ActionsChain {
             if (consistencyOverride != null) {
                 intentium.withConsistencyCheck(consistencyOverride);
             }
-
-            ExecutionContext ctx = ExecutionContext.create(intentium);
 
             for (Consumer<ExecutionContext> step : steps) {
                 step.accept(ctx);
@@ -169,22 +204,105 @@ public final class ActionsChain {
     }
 
     /**
-     * Convenience: add click for current intent and execute chain immediately.
+     * Convenience: add click for current target and execute chain immediately.
+     *
+     * <pre>
+     * actionsChain()
+     *   .into("login field").send("user")
+     *   .into("password field").send("secret")
+     *   .at("login button").performClick();
+     * </pre>
      */
     public void performClick() {
         click();
         perform();
     }
 
-    private String requireCurrentIntent() {
-        if (currentIntent == null || currentIntent.isBlank()) {
-            throw new IllegalStateException("No current intent selected. Call into(...) or at(...) first.");
+    private TargetRef requireCurrentTarget() {
+        if (currentTarget == null) {
+            throw new IllegalStateException("No current target selected. Call into(...) or at(...) first.");
         }
-        return currentIntent;
+        return currentTarget;
     }
 
     /**
-     * Per-execution context holding a DOM snapshot and a cache of resolved intents.
+     * Target abstraction for chain steps.
+     */
+    private interface TargetRef {
+
+        IntentiumWebDriver.ResolvedElement resolve(ExecutionContext ctx, boolean forceLocators);
+
+        String cacheKey();
+
+        static TargetRef intent(String phrase) {
+            return new IntentTarget(phrase);
+        }
+
+        static TargetRef by(By by) {
+            return new ByTarget(by);
+        }
+
+        static TargetRef element(WebElement element) {
+            return new ElementTarget(element);
+        }
+    }
+
+    private static final class IntentTarget implements TargetRef {
+        private final String phrase;
+
+        private IntentTarget(String phrase) {
+            this.phrase = Objects.requireNonNull(phrase, "intentPhrase must not be null");
+        }
+
+        @Override
+        public IntentiumWebDriver.ResolvedElement resolve(ExecutionContext ctx, boolean forceLocators) {
+            return ctx.resolveIntent(phrase, forceLocators);
+        }
+
+        @Override
+        public String cacheKey() {
+            return "intent:" + phrase;
+        }
+    }
+
+    private static final class ByTarget implements TargetRef {
+        private final By by;
+
+        private ByTarget(By by) {
+            this.by = Objects.requireNonNull(by, "by must not be null");
+        }
+
+        @Override
+        public IntentiumWebDriver.ResolvedElement resolve(ExecutionContext ctx, boolean forceLocators) {
+            return ctx.resolveBy(by, forceLocators);
+        }
+
+        @Override
+        public String cacheKey() {
+            return "by:" + by;
+        }
+    }
+
+    private static final class ElementTarget implements TargetRef {
+        private final WebElement element;
+
+        private ElementTarget(WebElement element) {
+            this.element = Objects.requireNonNull(element, "element must not be null");
+        }
+
+        @Override
+        public IntentiumWebDriver.ResolvedElement resolve(ExecutionContext ctx, boolean forceLocators) {
+            return ctx.resolveWebElement(element, forceLocators);
+        }
+
+        @Override
+        public String cacheKey() {
+            return "element@" + System.identityHashCode(element);
+        }
+    }
+
+    /**
+     * Per-execution context holding a DOM snapshot and per-target resolved cache.
      */
     private static final class ExecutionContext {
 
@@ -205,20 +323,34 @@ public final class ActionsChain {
             return new ExecutionContext(intentium);
         }
 
-        IntentiumWebDriver.ResolvedElement resolve(String intentPhrase, boolean forceLocators) {
+        IntentiumWebDriver.ResolvedElement resolve(TargetRef target, boolean forceLocators) {
+            Objects.requireNonNull(target, "target must not be null");
             ensureSnapshotIsValid();
 
-            String cacheKey = intentPhrase + "|forceLocators=" + forceLocators;
+            String cacheKey = target.cacheKey() + "|forceLocators=" + forceLocators;
             IntentiumWebDriver.ResolvedElement cached = resolvedCache.get(cacheKey);
             if (cached != null) {
                 return cached;
             }
 
-            IntentiumWebDriver.ResolvedElement resolved =
-                    intentium.resolveIntent(intentPhrase, candidatesSnapshot, forceLocators);
-
+            IntentiumWebDriver.ResolvedElement resolved = target.resolve(this, forceLocators);
             resolvedCache.put(cacheKey, resolved);
             return resolved;
+        }
+
+        IntentiumWebDriver.ResolvedElement resolveIntent(String intentPhrase, boolean forceLocators) {
+            ensureSnapshotIsValid();
+            return intentium.resolveIntent(intentPhrase, candidatesSnapshot, forceLocators);
+        }
+
+        IntentiumWebDriver.ResolvedElement resolveBy(By by, boolean forceLocators) {
+            ensureSnapshotIsValid();
+            return intentium.resolveBy(by, forceLocators);
+        }
+
+        IntentiumWebDriver.ResolvedElement resolveWebElement(WebElement element, boolean forceLocators) {
+            ensureSnapshotIsValid();
+            return intentium.resolveWebElement(element, forceLocators);
         }
 
         private void ensureSnapshotIsValid() {
