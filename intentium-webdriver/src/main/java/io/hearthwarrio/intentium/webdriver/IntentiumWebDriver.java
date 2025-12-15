@@ -46,7 +46,7 @@ public class IntentiumWebDriver {
     }
 
     /**
-     * Internal resolved element data container used for caching within a chain.
+     * Internal resolved element data container used for caching.
      * Package-private on purpose.
      */
     static final class ResolvedElement {
@@ -73,6 +73,21 @@ public class IntentiumWebDriver {
             this.cssSelector = cssSelector;
         }
     }
+
+    /**
+     * p.4 fix: last resolved cache for locator-related calls.
+     * <p>
+     * Goal: avoid double-resolve for getXPath/getCssSelector (and reduce mismatch risk on dynamic DOM).
+     */
+    private static final class LastLocatorsCache {
+        String url;
+        String intentPhrase;
+        ResolvedElementLogger loggerAtResolve;
+        boolean consistencyAtResolve;
+        ResolvedElement resolved; // resolved WITH locators
+    }
+
+    private final LastLocatorsCache lastLocatorsCache = new LastLocatorsCache();
 
     public IntentiumWebDriver(WebDriver driver, Language language) {
         this(driver, language, new DefaultIntentResolver(), new DefaultElementSelector(), null);
@@ -197,11 +212,17 @@ public class IntentiumWebDriver {
         resolveIntent(intentPhrase, false).element.sendKeys(keys);
     }
 
+    /**
+     * p.4: uses last-resolve cache to avoid second DOM pass if getCssSelector() follows.
+     */
     public String getXPath(String intentPhrase) {
         ResolvedElement r = resolveIntent(intentPhrase, true);
         return r.xPath;
     }
 
+    /**
+     * p.4: uses last-resolve cache to avoid second DOM pass if getXPath() preceded.
+     */
     public String getCssSelector(String intentPhrase) {
         ResolvedElement r = resolveIntent(intentPhrase, true);
         return r.cssSelector;
@@ -218,11 +239,25 @@ public class IntentiumWebDriver {
     // ----------- internal resolve API (for caching) -----------
 
     ResolvedElement resolveIntent(String intentPhrase, boolean forceLocators) {
+        if (forceLocators) {
+            ResolvedElement cached = tryGetLastLocators(intentPhrase);
+            if (cached != null) {
+                return cached;
+            }
+        }
+
         CandidatesSnapshot snapshot = collectCandidatesSnapshot();
         if (snapshot.domCandidates.isEmpty()) {
             throw new ElementSelectionException("No candidates found on page");
         }
-        return resolveIntent(intentPhrase, snapshot, forceLocators);
+
+        ResolvedElement resolved = resolveIntent(intentPhrase, snapshot, forceLocators);
+
+        if (forceLocators) {
+            storeLastLocators(intentPhrase, resolved);
+        }
+
+        return resolved;
     }
 
     ResolvedElement resolveIntent(
@@ -268,9 +303,6 @@ public class IntentiumWebDriver {
         return new ResolvedElement(intentPhrase, role, elementInfo, webElement, xPath, css);
     }
 
-    /**
-     * Backward-compatible overload for callers that cache candidates as Map + List.
-     */
     ResolvedElement resolveIntent(
             String intentPhrase,
             Map<DomElementInfo, WebElement> candidatesMap,
@@ -279,6 +311,38 @@ public class IntentiumWebDriver {
     ) {
         CandidatesSnapshot snapshot = new CandidatesSnapshot(domCandidates, candidatesMap);
         return resolveIntent(intentPhrase, snapshot, forceLocators);
+    }
+
+    private ResolvedElement tryGetLastLocators(String intentPhrase) {
+        String url = currentUrl();
+
+        if (!Objects.equals(lastLocatorsCache.url, url)) {
+            return null;
+        }
+        if (!Objects.equals(lastLocatorsCache.intentPhrase, intentPhrase)) {
+            return null;
+        }
+        if (lastLocatorsCache.loggerAtResolve != resolvedElementLogger) {
+            return null;
+        }
+        if (lastLocatorsCache.consistencyAtResolve != consistencyCheckEnabled) {
+            return null;
+        }
+        if (lastLocatorsCache.resolved == null) {
+            return null;
+        }
+        if (lastLocatorsCache.resolved.xPath == null || lastLocatorsCache.resolved.cssSelector == null) {
+            return null;
+        }
+        return lastLocatorsCache.resolved;
+    }
+
+    private void storeLastLocators(String intentPhrase, ResolvedElement resolved) {
+        lastLocatorsCache.url = currentUrl();
+        lastLocatorsCache.intentPhrase = intentPhrase;
+        lastLocatorsCache.loggerAtResolve = resolvedElementLogger;
+        lastLocatorsCache.consistencyAtResolve = consistencyCheckEnabled;
+        lastLocatorsCache.resolved = resolved;
     }
 
     // ----------- locator builders (P.3 hardened) -----------
@@ -302,7 +366,6 @@ public class IntentiumWebDriver {
         String label = normalizeText(safe(info == null ? null : info.getLabelText()));
         String cssClasses = safe(info == null ? null : info.getCssClasses());
 
-        // 1) Unique single-attribute in context (tag + form)
         if (isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getName, name)) {
             return xPathWithFormPrefix(form, "//" + tag + "[@name=" + xpathLiteral(name) + "]");
         }
@@ -316,7 +379,6 @@ public class IntentiumWebDriver {
             return xPathWithFormPrefix(form, "//" + tag + "[@title=" + xpathLiteral(title) + "]");
         }
 
-        // 2) Unique attribute + type (slightly stronger)
         if (isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getName, name, DomElementInfo::getType, type)) {
             return xPathWithFormPrefix(form, "//" + tag +
                     "[@name=" + xpathLiteral(name) + " and @type=" + xpathLiteral(type) + "]");
@@ -334,7 +396,6 @@ public class IntentiumWebDriver {
                     "[@title=" + xpathLiteral(title) + " and @type=" + xpathLiteral(type) + "]");
         }
 
-        // 3) Unique single class token (exact token match)
         String classToken = pickUniqueClassToken(snapshot, tag, formKey, cssClasses);
         if (classToken != null) {
             String classPredicate = "contains(concat(' ', normalize-space(@class), ' '), " +
@@ -342,13 +403,11 @@ public class IntentiumWebDriver {
             return xPathWithFormPrefix(form, "//" + tag + "[" + classPredicate + "]");
         }
 
-        // 4) Label-based XPath (best-effort; can be very good for forms)
         if (!label.isBlank()) {
             String labelXPath = "//label[normalize-space(.)=" + xpathLiteral(label) + "]/following::" + tag + "[1]";
             return xPathWithFormPrefix(form, labelXPath);
         }
 
-        // 5) Positional fallback for XPath (still better than //tag)
         String base = "//" + tag;
         if (!type.isBlank() && "input".equalsIgnoreCase(tag)) {
             base = base + "[@type=" + xpathLiteral(type) + "]";
@@ -359,7 +418,6 @@ public class IntentiumWebDriver {
             return xPathWithFormPrefix(form, "(" + base + ")[" + ordinal + "]");
         }
 
-        // Absolute last resort
         return xPathWithFormPrefix(form, "//" + tag);
     }
 
@@ -381,7 +439,6 @@ public class IntentiumWebDriver {
         String title = safe(info == null ? null : info.getTitle());
         String cssClasses = safe(info == null ? null : info.getCssClasses());
 
-        // 1) Unique single-attribute in context (tag + form)
         if (isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getName, name)) {
             return cssWithFormPrefix(form, tag + "[name=" + cssAttrLiteral(name) + "]");
         }
@@ -395,7 +452,6 @@ public class IntentiumWebDriver {
             return cssWithFormPrefix(form, tag + "[title=" + cssAttrLiteral(title) + "]");
         }
 
-        // 2) Unique attribute + type
         if (isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getName, name, DomElementInfo::getType, type)) {
             return cssWithFormPrefix(form, tag +
                     "[name=" + cssAttrLiteral(name) + "][type=" + cssAttrLiteral(type) + "]");
@@ -413,18 +469,15 @@ public class IntentiumWebDriver {
                     "[title=" + cssAttrLiteral(title) + "][type=" + cssAttrLiteral(type) + "]");
         }
 
-        // 3) Unique single class token
         String classToken = pickUniqueClassToken(snapshot, tag, formKey, cssClasses);
         if (classToken != null) {
-            return cssWithFormPrefix(form, tag + "." + cssEscapeClassToken(classToken));
+            return cssWithFormPrefix(form, tag + "." + cssEscapeIdentifier(classToken));
         }
 
-        // 4) Best-effort fallback: tag + type (if it reduces ambiguity)
         if (!type.isBlank() && isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getType, type)) {
             return cssWithFormPrefix(form, tag + "[type=" + cssAttrLiteral(type) + "]");
         }
 
-        // Absolute last resort
         return cssWithFormPrefix(form, tag);
     }
 
@@ -685,36 +738,6 @@ public class IntentiumWebDriver {
         return false;
     }
 
-    // ----------- old builders kept (v0.1) -----------
-
-    String buildSimpleXPath(WebElement element) {
-        String id = element.getAttribute("id");
-        if (id != null && !id.isBlank()) {
-            return "//*[@id=" + xpathLiteral(id) + "]";
-        }
-
-        String name = element.getAttribute("name");
-        if (name != null && !name.isBlank()) {
-            return "//" + element.getTagName() + "[@name=" + xpathLiteral(name) + "]";
-        }
-
-        return "//" + element.getTagName();
-    }
-
-    String buildSimpleCssSelector(WebElement element) {
-        String id = element.getAttribute("id");
-        if (id != null && !id.isBlank()) {
-            return "#" + cssEscapeIdentifier(id);
-        }
-
-        String name = element.getAttribute("name");
-        if (name != null && !name.isBlank()) {
-            return element.getTagName() + "[name=" + cssAttrLiteral(name) + "]";
-        }
-
-        return element.getTagName();
-    }
-
     // ----------- misc helpers -----------
 
     private String safeTagName(DomElementInfo info, WebElement element) {
@@ -789,11 +812,6 @@ public class IntentiumWebDriver {
             }
         }
         return sb.toString();
-    }
-
-    private String cssEscapeClassToken(String token) {
-        // For class tokens we can keep it simple – they normally match [-_a-zA-Z0-9].
-        return cssEscapeIdentifier(token);
     }
 
     // ----------- consistency check -----------
