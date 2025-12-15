@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>Intentium role widgets demo</title>
+    <style>
+        body { font-family: sans-serif; padding: 24px; }
+        .field { margin: 12px 0; }
+        .textbox {
+          border: 1px solid #999; padding: 8px; width: 320px; min-height: 20px;
+        }
+        .btn {
+          display: inline-block; padding: 10px 16px; border: 1px solid #333; cursor: pointer;
+          user-select: none;
+        }
+    </style>
+</head>
+<body>
+
+<h1>Login</h1>
+
+<form id="loginForm">
+    <div class="field">
+        <label for="loginBox">Login</label>
+        <div id="loginBox"
+             class="textbox"
+             role="textbox"
+             contenteditable="true"
+             aria-label="Login"></div>
+    </div>
+
+    <div class="field">
+        <label for="pwd">Password</label>
+        <input id="pwd"
+               name="password"
+               type="password"
+               placeholder="Password" />
+    </div>
+
+    <div class="field">
+        <div id="loginBtn"
+             class="btn"
+             role="button"
+             aria-label="Log In"
+             onclick="document.getElementById('result').textContent = 'OK';">
+            Log In
+        </div>
+    </div>
+</form>
+
+<div id="result"></div>
+
+</body>
+</html>

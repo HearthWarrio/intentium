@@ -14,10 +14,15 @@ import java.util.Objects;
 
 /**
  * Extracts {@link DomElementInfo} snapshots from a Selenium WebDriver page.
- * <p>
- * v0.1: collects inputs and buttons on the current page.
+ *
+ * v0.2 (P.5):
+ * – collects a broader set of interactive elements
+ * – adds role/contenteditable hints into surroundingText for better scoring
  */
 public class WebDriverDomMapper {
+
+    private static final String HINT_PREFIX = "[intentium:";
+    private static final String HINT_SUFFIX = "]";
 
     private final WebDriver driver;
 
@@ -27,9 +32,9 @@ public class WebDriverDomMapper {
 
     /**
      * Candidate pair: a {@link DomElementInfo} snapshot instance and the underlying {@link WebElement}.
-     * <p>
-     * Important: {@link DomElementInfo} has {@code equals/hashCode}. Multiple real DOM elements can produce
-     * identical snapshots. We therefore keep identity-stable {@link DomElementInfo} instances per element.
+     *
+     * Important: DomElementInfo may have equals/hashCode and different DOM nodes can produce identical snapshots.
+     * We therefore keep identity-stable DomElementInfo instances per element.
      */
     static final class Candidate {
         private final DomElementInfo info;
@@ -51,9 +56,8 @@ public class WebDriverDomMapper {
 
     /**
      * Collect all candidate elements on the current page.
-     * <p>
-     * Kept for backward compatibility, but it uses identity semantics to avoid
-     * accidental de-duplication when two different elements have equal {@link DomElementInfo} snapshots.
+     *
+     * Kept for backward compatibility, but it uses identity semantics to avoid accidental de-duplication.
      */
     public Map<DomElementInfo, WebElement> collectCandidates() {
         Map<DomElementInfo, WebElement> result = new IdentityHashMap<>();
@@ -65,15 +69,35 @@ public class WebDriverDomMapper {
 
     /**
      * Collect candidates as an ordered list of pairs.
-     * <p>
-     * Order is the same as returned by {@link WebDriver#findElements(By)}.
      */
     List<Candidate> collectCandidateList() {
         List<Candidate> result = new ArrayList<>();
 
-        List<WebElement> elements = driver.findElements(By.cssSelector("input, button"));
+        String selector =
+                "input, button, textarea, select, a, " +
+                        "[role='button'], [role='textbox'], [role='combobox'], [role='listbox'], " +
+                        "[contenteditable='true'], [contenteditable='']";
+
+        List<WebElement> elements = driver.findElements(By.cssSelector(selector));
 
         for (WebElement element : elements) {
+            if (element == null) {
+                continue;
+            }
+
+            String tag = safeAttr(element::getTagName);
+            String type = attr(element, "type");
+
+            // Skip hidden inputs early – they create a lot of noise.
+            if ("input".equalsIgnoreCase(tag) && "hidden".equalsIgnoreCase(type)) {
+                continue;
+            }
+
+            // Prefer visible candidates (less noise, fewer accidental matches).
+            if (!safeIsDisplayed(element)) {
+                continue;
+            }
+
             DomElementInfo info = toDomElementInfo(element);
             result.add(new Candidate(info, element));
         }
@@ -95,7 +119,13 @@ public class WebDriverDomMapper {
         String placeholder = attr(element, "placeholder");
         String ariaLabel = attr(element, "aria-label");
         String title = attr(element, "title");
+
+        String role = attr(element, "role");
+        String contentEditable = attr(element, "contenteditable");
+
         String surroundingText = resolveSurroundingText(element);
+        surroundingText = prependHints(surroundingText, role, contentEditable);
+
         String formIdentifier = resolveFormIdentifier(element);
 
         return new DomElementInfo(
@@ -111,6 +141,35 @@ public class WebDriverDomMapper {
                 surroundingText,
                 formIdentifier
         );
+    }
+
+    private String prependHints(String base, String role, String contentEditable) {
+        StringBuilder sb = new StringBuilder();
+
+        if (role != null && !role.isBlank()) {
+            sb.append(HINT_PREFIX).append("role=").append(role.trim()).append(HINT_SUFFIX);
+        }
+
+        if (contentEditable != null) {
+            String v = contentEditable.trim().toLowerCase();
+            if ("true".equals(v) || v.isEmpty()) {
+                sb.append(HINT_PREFIX).append("contenteditable").append(HINT_SUFFIX);
+            }
+        }
+
+        if (base != null && !base.isBlank()) {
+            sb.append(base);
+        }
+
+        return sb.toString();
+    }
+
+    private boolean safeIsDisplayed(WebElement element) {
+        try {
+            return element.isDisplayed();
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private String attr(WebElement element, String name) {
@@ -143,7 +202,7 @@ public class WebDriverDomMapper {
                     }
                 }
             } catch (Exception ignored) {
-                // ignore
+
             }
         }
 
@@ -156,13 +215,26 @@ public class WebDriverDomMapper {
                 }
             }
         } catch (Exception ignored) {
-            // ignore
+
         }
 
         return "";
     }
 
+    /**
+     * Prefer element.getText() (good for buttons/links/role widgets),
+     * fallback to parent container text (good for inputs).
+     */
     private String resolveSurroundingText(WebElement element) {
+        try {
+            String selfText = element.getText();
+            if (selfText != null && !selfText.isBlank()) {
+                return selfText;
+            }
+        } catch (Exception ignored) {
+
+        }
+
         try {
             WebElement parent = element.findElement(By.xpath(".."));
             String text = parent.getText();
@@ -191,9 +263,6 @@ public class WebDriverDomMapper {
         }
     }
 
-    /**
-     * Very naive CSS escaping for id; v0.1 assumes no exotic cases.
-     */
     private String cssEscape(String value) {
         return value.replace("'", "\\'");
     }
