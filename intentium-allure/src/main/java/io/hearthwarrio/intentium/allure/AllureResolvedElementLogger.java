@@ -11,12 +11,12 @@ import org.openqa.selenium.WebDriver;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Objects;
 
 /**
- * {@link ResolvedElementLogger} integration for Allure.
+ * Allure logger for resolved elements.
  * <p>
- * Writes intent, role, and locator information to an Allure step.
- * Screenshots are strictly optional to avoid slowing down tests and inflating reports.
+ * Lives in intentium-allure to avoid leaking Allure dependency into core/webdriver.
  */
 public final class AllureResolvedElementLogger implements ResolvedElementLogger {
 
@@ -25,9 +25,14 @@ public final class AllureResolvedElementLogger implements ResolvedElementLogger 
     private final boolean attachScreenshot;
 
     public AllureResolvedElementLogger(WebDriver driver, LocatorLogDetail detail, boolean attachScreenshot) {
-        this.driver = driver;
+        this.driver = Objects.requireNonNull(driver, "driver must not be null");
         this.detail = detail == null ? LocatorLogDetail.NONE : detail;
         this.attachScreenshot = attachScreenshot;
+    }
+
+    @Override
+    public LocatorLogDetail detail() {
+        return detail;
     }
 
     @Override
@@ -38,29 +43,28 @@ public final class AllureResolvedElementLogger implements ResolvedElementLogger 
             String cssSelector,
             DomElementInfo elementInfo
     ) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("Intent: '").append(intentPhrase).append('\'')
-                .append("\nRole: ").append(role);
+        Origin origin = OriginResolver.resolve(intentPhrase);
 
-        if (shouldLogXPath(detail)) {
-            sb.append("\nXPath: ").append(xPath);
-        }
-        if (shouldLogCss(detail)) {
-            sb.append("\nCSS: ").append(cssSelector);
-        }
-
-        if (elementInfo != null) {
-            sb.append("\n\nDomElementInfo:")
-                    .append("\nTag: ").append(elementInfo.getTagName())
-                    .append("\nId: ").append(elementInfo.getId())
-                    .append("\nName: ").append(elementInfo.getName())
-                    .append("\nType: ").append(elementInfo.getType())
-                    .append("\nClasses: ").append(elementInfo.getCssClasses());
-        }
-
-        String title = "Intentium: '" + intentPhrase + "' → " + role;
+        String title = "Intentium: " + safe(intentPhrase) + " – " + role;
 
         Allure.step(title, () -> {
+            StringBuilder sb = new StringBuilder(512);
+
+            sb.append("target: ").append(safe(intentPhrase)).append('\n')
+                    .append("role: ").append(role).append('\n');
+
+            if (detail == LocatorLogDetail.XPATH_ONLY || detail == LocatorLogDetail.BOTH) {
+                sb.append("xpath(").append(origin.xpathOrigin).append("): ").append(nullSafe(xPath)).append('\n');
+            }
+            if (detail == LocatorLogDetail.CSS_ONLY || detail == LocatorLogDetail.BOTH) {
+                sb.append("css(").append(origin.cssOrigin).append("): ").append(nullSafe(cssSelector)).append('\n');
+            }
+
+            if (elementInfo != null) {
+                sb.append("dom.id: ").append(nullSafe(elementInfo.getId())).append('\n')
+                        .append("dom.name: ").append(nullSafe(elementInfo.getName())).append('\n');
+            }
+
             byte[] txt = sb.toString().getBytes(StandardCharsets.UTF_8);
             Allure.addAttachment(
                     "Resolved element",
@@ -81,15 +85,42 @@ public final class AllureResolvedElementLogger implements ResolvedElementLogger 
         });
     }
 
-    private boolean shouldLogXPath(LocatorLogDetail d) {
-        return d == LocatorLogDetail.XPATH_ONLY
-                || d == LocatorLogDetail.BOTH
-                || d == LocatorLogDetail.XPATH_AND_CSS;
+    private static String safe(String s) {
+        return s == null ? "" : s;
     }
 
-    private boolean shouldLogCss(LocatorLogDetail d) {
-        return d == LocatorLogDetail.CSS_ONLY
-                || d == LocatorLogDetail.BOTH
-                || d == LocatorLogDetail.XPATH_AND_CSS;
+    private static String nullSafe(String s) {
+        return s == null ? "null" : s;
+    }
+
+    private enum OriginMark {
+        manual, derived
+    }
+
+    private static final class Origin {
+        private final OriginMark xpathOrigin;
+        private final OriginMark cssOrigin;
+
+        private Origin(OriginMark xpathOrigin, OriginMark cssOrigin) {
+            this.xpathOrigin = xpathOrigin;
+            this.cssOrigin = cssOrigin;
+        }
+    }
+
+    private static final class OriginResolver {
+        private static Origin resolve(String targetDescription) {
+            String s = targetDescription == null ? "" : targetDescription;
+
+            boolean manualXpath = s.contains("By.xpath:");
+            boolean manualCss = s.contains("By.cssSelector:");
+
+            if (manualXpath && !manualCss) {
+                return new Origin(OriginMark.manual, OriginMark.derived);
+            }
+            if (manualCss && !manualXpath) {
+                return new Origin(OriginMark.derived, OriginMark.manual);
+            }
+            return new Origin(OriginMark.derived, OriginMark.derived);
+        }
     }
 }
