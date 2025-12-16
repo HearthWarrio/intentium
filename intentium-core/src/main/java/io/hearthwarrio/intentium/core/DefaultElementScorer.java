@@ -3,21 +3,19 @@ package io.hearthwarrio.intentium.core;
 import java.util.Locale;
 
 /**
- * Naive semantic scoring for login forms.
- *
- * v0.2 (P.5):
- * – supports broader candidate tags: textarea, select, a, role widgets, contenteditable
- * – reduces noise from hidden inputs
+ * Heuristic scorer for common auth intents.
+ * <p>
+ * Designed to work even without test/qa attributes,
+ * but heavily benefits from them when present.
  */
 public class DefaultElementScorer implements ElementScorer {
 
-    private static final String HINT_ROLE_BUTTON = "[intentium:role=button]";
-    private static final String HINT_ROLE_TEXTBOX = "[intentium:role=textbox]";
-    private static final String HINT_ROLE_COMBOBOX = "[intentium:role=combobox]";
-    private static final String HINT_CONTENTEDITABLE = "[intentium:contenteditable]";
-
     @Override
     public double score(IntentRole role, DomElementInfo element) {
+        if (role == null || element == null) {
+            return 0.0;
+        }
+
         switch (role) {
             case LOGIN_FIELD:
                 return scoreLoginField(element);
@@ -33,34 +31,35 @@ public class DefaultElementScorer implements ElementScorer {
     private double scoreLoginField(DomElementInfo e) {
         double score = 0.0;
 
+        String testValue = lower(e.getTestAttributeValue());
+        if (!testValue.isEmpty()) {
+            // test/qa hooks are a strong semantic signal
+            score += 0.5;
+            if (containsAny(testValue,
+                    "login", "user", "username", "email", "e-mail", "mail",
+                    "логин", "польз", "почт", "email")) {
+                score += 2.0;
+            }
+        }
+
         String tag = lower(e.getTagName());
         String type = lower(e.getType());
 
         if ("input".equals(tag) && "hidden".equals(type)) {
-            return -100.0;
+            return 0.0;
         }
 
         if ("input".equals(tag)) {
-            score += 1.0;
-            if (type.isEmpty() || "text".equals(type)) {
-                score += 1.0;
-            } else if ("email".equals(type)) {
+            score += 3.0;
+            if (type.isEmpty() || containsAny(type, "text", "email", "tel", "number", "search")) {
                 score += 2.0;
+            } else {
+                score -= 1.0;
             }
         } else if ("textarea".equals(tag)) {
-            score += 0.5;
-        } else if ("select".equals(tag)) {
+            score += 3.0;
+        } else if (containsAny(tag, "div", "span")) {
             score += 0.1;
-        } else if ("div".equals(tag) || "span".equals(tag)) {
-            score += 0.1;
-        }
-
-        String surrounding = safe(e.getSurroundingText());
-        if (surrounding.contains(HINT_ROLE_TEXTBOX) || surrounding.contains(HINT_CONTENTEDITABLE)) {
-            score += 1.0;
-        }
-        if (surrounding.contains(HINT_ROLE_COMBOBOX)) {
-            score += 0.5;
         }
 
         String combinedText = join(
@@ -70,14 +69,19 @@ public class DefaultElementScorer implements ElementScorer {
                 e.getTitle(),
                 e.getSurroundingText(),
                 e.getName(),
-                e.getId()
+                e.getId(),
+                e.getTestAttributeValue(),
+                e.getTestAttributeName()
         );
 
         if (containsAny(combinedText,
-                "login", "user", "username", "user name",
-                "email", "e-mail",
-                "логин", "имя пользователя", "юзернейм", "почта", "email")) {
-            score += 3.0;
+                "login", "user", "username", "email", "e-mail", "mail", "phone", "tel",
+                "логин", "польз", "почт", "тел")) {
+            score += 2.0;
+        }
+
+        if (containsAny(combinedText, "password", "пароль")) {
+            score -= 2.0;
         }
 
         return score;
@@ -86,24 +90,30 @@ public class DefaultElementScorer implements ElementScorer {
     private double scorePasswordField(DomElementInfo e) {
         double score = 0.0;
 
+        String testValue = lower(e.getTestAttributeValue());
+        if (!testValue.isEmpty()) {
+            score += 0.5;
+            if (containsAny(testValue,
+                    "password", "pass", "pwd", "secret",
+                    "пароль", "пасс")) {
+                score += 2.0;
+            }
+        }
+
         String tag = lower(e.getTagName());
         String type = lower(e.getType());
 
         if ("input".equals(tag) && "hidden".equals(type)) {
-            return -100.0;
+            return 0.0;
         }
 
-        if ("input".equals(tag) && "password".equals(type)) {
-            score += 4.0;
-        } else if ("input".equals(tag) || "textarea".equals(tag)) {
-            score += 0.5;
-        } else if ("div".equals(tag) || "span".equals(tag)) {
+        if ("input".equals(tag)) {
+            score += 3.0;
+            if ("password".equals(type)) {
+                score += 4.0;
+            }
+        } else if (containsAny(tag, "div", "span")) {
             score += 0.1;
-        }
-
-        String surrounding = safe(e.getSurroundingText());
-        if (surrounding.contains(HINT_ROLE_TEXTBOX) || surrounding.contains(HINT_CONTENTEDITABLE)) {
-            score += 0.75;
         }
 
         String combinedText = join(
@@ -113,10 +123,14 @@ public class DefaultElementScorer implements ElementScorer {
                 e.getTitle(),
                 e.getSurroundingText(),
                 e.getName(),
-                e.getId()
+                e.getId(),
+                e.getTestAttributeValue(),
+                e.getTestAttributeName()
         );
 
-        if (containsAny(combinedText, "password", "pwd", "пароль", "пасс")) {
+        if (containsAny(combinedText,
+                "password", "pass", "pwd", "secret",
+                "пароль", "пасс")) {
             score += 2.0;
         }
 
@@ -126,29 +140,27 @@ public class DefaultElementScorer implements ElementScorer {
     private double scoreLoginButton(DomElementInfo e) {
         double score = 0.0;
 
+        String testValue = lower(e.getTestAttributeValue());
+        if (!testValue.isEmpty()) {
+            score += 0.5;
+            if (containsAny(testValue,
+                    "login", "signin", "sign-in", "sign in", "submit", "enter",
+                    "войти", "вход", "логин", "авториз")) {
+                score += 2.0;
+            }
+        }
+
         String tag = lower(e.getTagName());
         String type = lower(e.getType());
 
-        if ("input".equals(tag) && "hidden".equals(type)) {
-            return -100.0;
-        }
-
         if ("button".equals(tag)) {
+            score += 3.0;
+        } else if ("input".equals(tag) && containsAny(type, "submit", "button")) {
+            score += 3.0;
+        } else if ("a".equals(tag)) {
             score += 1.0;
-        }
-        if ("input".equals(tag) && ("submit".equals(type) || "button".equals(type))) {
-            score += 1.0;
-        }
-        if ("a".equals(tag)) {
-            score += 0.5;
-        }
-        if ("div".equals(tag) || "span".equals(tag)) {
-            score += 0.25;
-        }
-
-        String surrounding = safe(e.getSurroundingText());
-        if (surrounding.contains(HINT_ROLE_BUTTON)) {
-            score += 1.0;
+        } else if (containsAny(tag, "div", "span")) {
+            score += 0.1;
         }
 
         String combinedText = join(
@@ -156,48 +168,65 @@ public class DefaultElementScorer implements ElementScorer {
                 e.getAriaLabel(),
                 e.getTitle(),
                 e.getSurroundingText(),
-                e.getName(),
                 e.getId(),
-                e.getPlaceholder()
+                e.getName(),
+                e.getTestAttributeValue(),
+                e.getTestAttributeName()
         );
 
-        if (containsAny(combinedText, "login", "log in", "sign in", "войти", "вход")) {
+        if (containsAny(combinedText,
+                "login", "sign in", "signin", "submit", "enter", "continue",
+                "войти", "вход", "логин", "авториз", "продолж")) {
             score += 3.0;
+        }
+
+        if (containsAny(combinedText, "register", "signup", "sign up", "регист")) {
+            score -= 1.5;
         }
 
         return score;
     }
 
-    private static String safe(String s) {
-        return s == null ? "" : s;
+    private String lower(String v) {
+        if (v == null) {
+            return "";
+        }
+        return v.trim().toLowerCase(Locale.ROOT);
     }
 
-    private static String lower(String s) {
-        return s == null ? "" : s.toLowerCase(Locale.ROOT);
-    }
-
-    private static boolean containsAny(String haystack, String... needles) {
-        String normalized = lower(haystack);
-        if (normalized.isEmpty()) {
+    private boolean containsAny(String haystack, String... needles) {
+        if (haystack == null) {
             return false;
         }
-        for (String needle : needles) {
-            if (!needle.isEmpty() && normalized.contains(needle.toLowerCase(Locale.ROOT))) {
+        String h = lower(haystack);
+        for (String n : needles) {
+            if (n == null || n.isEmpty()) {
+                continue;
+            }
+            if (h.contains(lower(n))) {
                 return true;
             }
         }
         return false;
     }
 
-    private static String join(String... parts) {
+    private String join(String... parts) {
+        if (parts == null || parts.length == 0) {
+            return "";
+        }
         StringBuilder sb = new StringBuilder();
-        for (String part : parts) {
-            if (part != null && !part.isBlank()) {
-                if (sb.length() > 0) {
-                    sb.append(' ');
-                }
-                sb.append(part);
+        for (String p : parts) {
+            if (p == null) {
+                continue;
             }
+            String t = p.trim();
+            if (t.isEmpty()) {
+                continue;
+            }
+            if (sb.length() > 0) {
+                sb.append(' ');
+            }
+            sb.append(t);
         }
         return sb.toString();
     }

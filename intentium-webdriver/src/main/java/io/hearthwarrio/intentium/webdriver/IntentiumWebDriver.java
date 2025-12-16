@@ -608,6 +608,15 @@ public class IntentiumWebDriver {
             return "//*[@id=" + xpathLiteral(id) + "]";
         }
 
+        String testAttrName = safe(info == null ? null : info.getTestAttributeName());
+        String testAttrValue = safe(info == null ? null : info.getTestAttributeValue());
+        if (!testAttrName.isBlank() && !testAttrValue.isBlank()) {
+            String candidate = "//" + tag + "[@" + testAttrName + "=" + xpathLiteral(testAttrValue) + "]";
+            if (isUnique(By.xpath(candidate))) {
+                return candidate;
+            }
+        }
+
         String name = safe(info == null ? null : info.getName());
         if (!name.isBlank()) {
             String candidate = "//" + tag + "[@name=" + xpathLiteral(name) + "]";
@@ -650,6 +659,15 @@ public class IntentiumWebDriver {
         String id = safe(info == null ? null : info.getId());
         if (!id.isBlank()) {
             return "#" + cssEscapeIdentifier(id);
+        }
+
+        String testAttrName = safe(info == null ? null : info.getTestAttributeName());
+        String testAttrValue = safe(info == null ? null : info.getTestAttributeValue());
+        if (!testAttrName.isBlank() && !testAttrValue.isBlank()) {
+            String candidate = tag + "[" + testAttrName + "=" + cssAttrLiteral(testAttrValue) + "]";
+            if (isUnique(By.cssSelector(candidate))) {
+                return candidate;
+            }
         }
 
         String name = safe(info == null ? null : info.getName());
@@ -708,6 +726,16 @@ public class IntentiumWebDriver {
         String id = safe(info == null ? null : info.getId());
         if (!id.isBlank()) {
             return "//*[@id=" + xpathLiteral(id) + "]";
+        }
+
+        String testAttrName = safe(info == null ? null : info.getTestAttributeName());
+        String testAttrValue = safe(info == null ? null : info.getTestAttributeValue());
+        if (!testAttrName.isBlank() && !testAttrValue.isBlank()) {
+            if (isUniqueInContext(snapshot, tag, formKey,
+                    DomElementInfo::getTestAttributeName, testAttrName,
+                    DomElementInfo::getTestAttributeValue, testAttrValue)) {
+                return xPathWithFormPrefix(form, "//" + tag + "[@" + testAttrName + "=" + xpathLiteral(testAttrValue) + "]");
+            }
         }
 
         String type = safe(info == null ? null : info.getType());
@@ -782,6 +810,16 @@ public class IntentiumWebDriver {
         String id = safe(info == null ? null : info.getId());
         if (!id.isBlank()) {
             return "#" + cssEscapeIdentifier(id);
+        }
+
+        String testAttrName = safe(info == null ? null : info.getTestAttributeName());
+        String testAttrValue = safe(info == null ? null : info.getTestAttributeValue());
+        if (!testAttrName.isBlank() && !testAttrValue.isBlank()) {
+            if (isUniqueInContext(snapshot, tag, formKey,
+                    DomElementInfo::getTestAttributeName, testAttrName,
+                    DomElementInfo::getTestAttributeValue, testAttrValue)) {
+                return cssWithFormPrefix(form, tag + "[" + testAttrName + "=" + cssAttrLiteral(testAttrValue) + "]");
+            }
         }
 
         String type = safe(info == null ? null : info.getType());
