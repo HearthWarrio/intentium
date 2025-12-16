@@ -6,28 +6,20 @@ import java.util.Locale;
 import java.util.Objects;
 
 /**
- * Default selector that uses an ElementScorer to pick the best candidate.
- *
- * Strategy v0.2 (P.5):
- * – lightweight role-based filtering (preferred candidates)
- * – fallback to full list if preferred yields no suitable match
- * – ambiguous best score is still a hard failure
+ * Default selector: chooses the best candidate by score and fails on ambiguity.
+ * <p>
+ * Includes lightweight role-based filtering and tiered preference for test/qa attributes.
  */
 public class DefaultElementSelector implements ElementSelector {
 
-    private static final String HINT_ROLE_BUTTON = "[intentium:role=button]";
-    private static final String HINT_ROLE_TEXTBOX = "[intentium:role=textbox]";
-    private static final String HINT_ROLE_COMBOBOX = "[intentium:role=combobox]";
-    private static final String HINT_CONTENTEDITABLE = "[intentium:contenteditable]";
-
     private final ElementScorer scorer;
-
-    public DefaultElementSelector(ElementScorer scorer) {
-        this.scorer = Objects.requireNonNull(scorer, "scorer must not be null");
-    }
 
     public DefaultElementSelector() {
         this(new DefaultElementScorer());
+    }
+
+    public DefaultElementSelector(ElementScorer scorer) {
+        this.scorer = Objects.requireNonNull(scorer, "scorer must not be null");
     }
 
     @Override
@@ -40,14 +32,13 @@ public class DefaultElementSelector implements ElementSelector {
         }
 
         List<DomElementInfo> preferred = filterPreferred(role, candidates);
-        if (!preferred.isEmpty()) {
-            ElementMatch preferredMatch = trySelectBestOrNull(role, preferred);
-            if (preferredMatch != null) {
-                return preferredMatch;
-            }
+
+        ElementMatch preferredMatch = trySelectWithTestTiersOrNull(role, preferred);
+        if (preferredMatch != null) {
+            return preferredMatch;
         }
 
-        ElementMatch fullMatch = trySelectBestOrNull(role, candidates);
+        ElementMatch fullMatch = trySelectWithTestTiersOrNull(role, candidates);
         if (fullMatch != null) {
             return fullMatch;
         }
@@ -55,38 +46,131 @@ public class DefaultElementSelector implements ElementSelector {
         throw new ElementSelectionException("No suitable match found for role " + role + " (all scores <= 0)");
     }
 
-    private ElementMatch trySelectBestOrNull(IntentRole role, List<DomElementInfo> candidates) {
-        DomElementInfo best = null;
-        DomElementInfo secondBest = null;
-        double bestScore = Double.NEGATIVE_INFINITY;
-        double secondBestScore = Double.NEGATIVE_INFINITY;
+    /**
+     * Tiered selection for better precision on real frontends.
+     * <p>
+     * Priority:
+     * <ol>
+     *   <li>Candidates with a test/qa attribute that also semantically matches the role</li>
+     *   <li>Any candidates with a test/qa attribute</li>
+     *   <li>Full list as fallback</li>
+     * </ol>
+     * <p>
+     * If a tier exists but all scores are {@code <= 0}, selector will fall back to the next tier.
+     */
+    private ElementMatch trySelectWithTestTiersOrNull(IntentRole role, List<DomElementInfo> candidates) {
+        if (candidates == null || candidates.isEmpty()) {
+            return null;
+        }
 
-        for (DomElementInfo candidate : candidates) {
-            if (candidate == null) {
-                continue;
-            }
-
-            double score = scorer.score(role, candidate);
-
-            if (score > bestScore) {
-                secondBestScore = bestScore;
-                secondBest = best;
-
-                bestScore = score;
-                best = candidate;
-            } else if (score > secondBestScore) {
-                secondBestScore = score;
-                secondBest = candidate;
+        List<DomElementInfo> tierMatch = filterTestTierMatch(role, candidates);
+        if (!tierMatch.isEmpty()) {
+            ElementMatch m = trySelectBestOrNull(role, tierMatch);
+            if (m != null) {
+                return m;
             }
         }
 
-        if (best == null || bestScore <= 0.0) {
+        List<DomElementInfo> tierAny = filterTestTierAny(candidates);
+        if (!tierAny.isEmpty()) {
+            ElementMatch m = trySelectBestOrNull(role, tierAny);
+            if (m != null) {
+                return m;
+            }
+        }
+
+        return trySelectBestOrNull(role, candidates);
+    }
+
+    private List<DomElementInfo> filterTestTierAny(List<DomElementInfo> candidates) {
+        List<DomElementInfo> out = new ArrayList<>();
+        for (DomElementInfo c : candidates) {
+            if (c == null) {
+                continue;
+            }
+            if (!lower(c.getTestAttributeValue()).isBlank()) {
+                out.add(c);
+            }
+        }
+        return out;
+    }
+
+    private List<DomElementInfo> filterTestTierMatch(IntentRole role, List<DomElementInfo> candidates) {
+        List<DomElementInfo> out = new ArrayList<>();
+        for (DomElementInfo c : candidates) {
+            if (c == null) {
+                continue;
+            }
+            String testValue = lower(c.getTestAttributeValue());
+            if (testValue.isBlank()) {
+                continue;
+            }
+            if (looksLikeRoleByTestId(role, testValue)) {
+                out.add(c);
+            }
+        }
+        return out;
+    }
+
+    private boolean looksLikeRoleByTestId(IntentRole role, String testValueLower) {
+        if (testValueLower == null) {
+            return false;
+        }
+
+        switch (role) {
+            case LOGIN_FIELD:
+                return containsAny(testValueLower,
+                        "login", "user", "username", "email", "e-mail", "mail", "phone",
+                        "логин", "польз", "почт", "тел"
+                );
+            case PASSWORD_FIELD:
+                return containsAny(testValueLower,
+                        "password", "pass", "pwd", "secret",
+                        "пароль", "пасс"
+                );
+            case LOGIN_BUTTON:
+                return containsAny(testValueLower,
+                        "login", "signin", "sign-in", "sign in", "submit", "enter",
+                        "войти", "вход", "логин", "авториз"
+                );
+            default:
+                return false;
+        }
+    }
+
+    private ElementMatch trySelectBestOrNull(IntentRole role, List<DomElementInfo> candidates) {
+        if (candidates == null || candidates.isEmpty()) {
+            return null;
+        }
+
+        double bestScore = Double.NEGATIVE_INFINITY;
+        DomElementInfo best = null;
+
+        double secondBestScore = Double.NEGATIVE_INFINITY;
+        DomElementInfo secondBest = null;
+
+        for (DomElementInfo c : candidates) {
+            double s = scorer.score(role, c);
+            if (s > bestScore) {
+                secondBestScore = bestScore;
+                secondBest = best;
+
+                bestScore = s;
+                best = c;
+            } else if (s > secondBestScore) {
+                secondBestScore = s;
+                secondBest = c;
+            }
+        }
+
+        if (bestScore <= 0.0 || best == null) {
             return null;
         }
 
         if (secondBest != null && Double.compare(bestScore, secondBestScore) == 0) {
             throw new ElementSelectionException(
-                    "Ambiguous match for role " + role + ": at least two candidates share the best score " + bestScore
+                    "Ambiguous match for role " + role + ": top two candidates have equal score=" + bestScore +
+                            ". Best=" + best + ", SecondBest=" + secondBest
             );
         }
 
@@ -94,11 +178,14 @@ public class DefaultElementSelector implements ElementSelector {
     }
 
     /**
-     * Lightweight role-based filtering to reduce noise when candidate list is broad.
-     * Must never break the system: if it filters too aggressively, fallback will use full list.
+     * Lightweight role-based prefiltering to reduce noise.
+     * This should not be too aggressive – scorer still decides.
      */
     private List<DomElementInfo> filterPreferred(IntentRole role, List<DomElementInfo> candidates) {
-        List<DomElementInfo> out = new ArrayList<>();
+        List<DomElementInfo> preferred = new ArrayList<>();
+        if (candidates == null || candidates.isEmpty()) {
+            return preferred;
+        }
 
         for (DomElementInfo c : candidates) {
             if (c == null) {
@@ -108,115 +195,100 @@ public class DefaultElementSelector implements ElementSelector {
             String tag = lower(c.getTagName());
             String type = lower(c.getType());
 
-            if ("input".equals(tag) && "hidden".equals(type)) {
-                continue;
+            if (role == IntentRole.PASSWORD_FIELD) {
+                if ("input".equals(tag) && "password".equals(type)) {
+                    preferred.add(c);
+                    continue;
+                }
             }
 
-            String s = safe(c.getSurroundingText());
+            if (role == IntentRole.LOGIN_BUTTON) {
+                if ("button".equals(tag)) {
+                    preferred.add(c);
+                    continue;
+                }
+                if ("input".equals(tag) && containsAny(type, "submit", "button")) {
+                    preferred.add(c);
+                    continue;
+                }
+            }
 
-            switch (role) {
-                case PASSWORD_FIELD:
-                    // Strongest hint for password – input[type=password]
-                    if ("input".equals(tag) && "password".equals(type)) {
-                        out.add(c);
-                        break;
+            if (role == IntentRole.LOGIN_FIELD) {
+                // Prefer text-like inputs/textarea/contenteditable
+                if ("textarea".equals(tag)) {
+                    preferred.add(c);
+                    continue;
+                }
+                if ("input".equals(tag)) {
+                    if (type.isEmpty() || containsAny(type, "text", "email", "tel", "number", "search")) {
+                        preferred.add(c);
+                        continue;
                     }
-                    // Custom textbox that "smells" like password
-                    if ((s.contains(HINT_ROLE_TEXTBOX) || s.contains(HINT_CONTENTEDITABLE)) && looksLikePassword(c)) {
-                        out.add(c);
-                    }
-                    break;
+                }
 
-                case LOGIN_FIELD:
-                    if ("input".equals(tag)) {
-                        if (type.isEmpty()
-                                || "text".equals(type)
-                                || "email".equals(type)
-                                || "search".equals(type)
-                                || "tel".equals(type)
-                                || "url".equals(type)) {
-                            out.add(c);
-                            break;
-                        }
-                    }
-                    if ("textarea".equals(tag)) {
-                        out.add(c);
-                        break;
-                    }
-                    if (s.contains(HINT_ROLE_TEXTBOX) || s.contains(HINT_ROLE_COMBOBOX) || s.contains(HINT_CONTENTEDITABLE)) {
-                        out.add(c);
-                    }
-                    break;
+                String s = lower(join(
+                        c.getId(),
+                        c.getName(),
+                        c.getLabelText(),
+                        c.getAriaLabel(),
+                        c.getPlaceholder(),
+                        c.getTitle(),
+                        c.getSurroundingText()
+                ));
 
-                case LOGIN_BUTTON:
-                    if ("button".equals(tag)) {
-                        out.add(c);
-                        break;
-                    }
-                    if ("input".equals(tag) && ("submit".equals(type) || "button".equals(type))) {
-                        out.add(c);
-                        break;
-                    }
-                    if ("a".equals(tag)) {
-                        out.add(c);
-                        break;
-                    }
-                    if (s.contains(HINT_ROLE_BUTTON)) {
-                        out.add(c);
-                    }
-                    break;
-
-                default:
-                    break;
+                if (s.contains(HINT_PREFIX + "role=textbox" + HINT_SUFFIX) ||
+                        s.contains(HINT_PREFIX + "role=combobox" + HINT_SUFFIX) ||
+                        s.contains(HINT_PREFIX + "contenteditable=true" + HINT_SUFFIX)) {
+                    preferred.add(c);
+                }
             }
         }
 
-        return out;
+        return preferred;
     }
 
-    private boolean looksLikePassword(DomElementInfo e) {
-        String combined = join(
-                e.getLabelText(),
-                e.getPlaceholder(),
-                e.getAriaLabel(),
-                e.getTitle(),
-                e.getSurroundingText(),
-                e.getName(),
-                e.getId()
-        );
-        return containsAny(combined, "password", "pwd", "пароль", "пасс");
+    private static final String HINT_PREFIX = "[hint:";
+    private static final String HINT_SUFFIX = "]";
+
+    private String lower(String v) {
+        if (v == null) {
+            return "";
+        }
+        return v.trim().toLowerCase(Locale.ROOT);
     }
 
-    private static String safe(String s) {
-        return s == null ? "" : s;
-    }
-
-    private static String lower(String s) {
-        return s == null ? "" : s.toLowerCase(Locale.ROOT);
-    }
-
-    private static boolean containsAny(String haystack, String... needles) {
-        String normalized = lower(haystack);
-        if (normalized.isEmpty()) {
+    private boolean containsAny(String haystackLower, String... needlesLower) {
+        if (haystackLower == null || haystackLower.isEmpty()) {
             return false;
         }
-        for (String needle : needles) {
-            if (!needle.isEmpty() && normalized.contains(needle.toLowerCase(Locale.ROOT))) {
+        for (String n : needlesLower) {
+            if (n == null || n.isEmpty()) {
+                continue;
+            }
+            if (haystackLower.contains(n)) {
                 return true;
             }
         }
         return false;
     }
 
-    private static String join(String... parts) {
+    private String join(String... parts) {
+        if (parts == null || parts.length == 0) {
+            return "";
+        }
         StringBuilder sb = new StringBuilder();
-        for (String part : parts) {
-            if (part != null && !part.isBlank()) {
-                if (sb.length() > 0) {
-                    sb.append(' ');
-                }
-                sb.append(part);
+        for (String p : parts) {
+            if (p == null) {
+                continue;
             }
+            String t = p.trim();
+            if (t.isEmpty()) {
+                continue;
+            }
+            if (sb.length() > 0) {
+                sb.append(' ');
+            }
+            sb.append(t);
         }
         return sb.toString();
     }
