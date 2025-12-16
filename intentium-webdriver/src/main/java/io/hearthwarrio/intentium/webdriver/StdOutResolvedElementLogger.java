@@ -19,7 +19,11 @@ public final class StdOutResolvedElementLogger implements ResolvedElementLogger 
     private final LocatorLogDetail detail;
 
     public StdOutResolvedElementLogger(LocatorLogDetail detail) {
-        this.detail = Objects.requireNonNull(detail, "detail must not be null");
+        LocatorLogDetail d = detail == null ? LocatorLogDetail.NONE : detail;
+        if (d == LocatorLogDetail.XPATH_AND_CSS) {
+            d = LocatorLogDetail.BOTH;
+        }
+        this.detail = Objects.requireNonNull(d, "detail must not be null");
     }
 
     @Override

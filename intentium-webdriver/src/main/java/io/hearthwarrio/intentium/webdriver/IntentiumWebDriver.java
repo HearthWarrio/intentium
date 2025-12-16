@@ -172,6 +172,27 @@ public class IntentiumWebDriver {
         this.resolvedElementLogger = logger;
     }
 
+    private LocatorLogDetail currentLogDetail() {
+        if (resolvedElementLogger == null) {
+            return LocatorLogDetail.NONE;
+        }
+
+        LocatorLogDetail d;
+        try {
+            d = resolvedElementLogger.detail();
+        } catch (RuntimeException e) {
+            d = LocatorLogDetail.BOTH;
+        }
+
+        if (d == null) {
+            d = LocatorLogDetail.BOTH;
+        }
+        if (d == LocatorLogDetail.XPATH_AND_CSS) {
+            d = LocatorLogDetail.BOTH;
+        }
+        return d;
+    }
+
     String currentUrl() {
         return driver.getCurrentUrl();
     }
@@ -361,21 +382,34 @@ public class IntentiumWebDriver {
             );
         }
 
-        boolean needLocators = forceLocators || resolvedElementLogger != null || consistencyCheckEnabled;
+        LocatorLogDetail logDetail = currentLogDetail();
+
+        boolean needXPath = forceLocators
+                || consistencyCheckEnabled
+                || (resolvedElementLogger != null && (logDetail == LocatorLogDetail.XPATH_ONLY || logDetail == LocatorLogDetail.BOTH));
+
+        boolean needCss = forceLocators
+                || consistencyCheckEnabled
+                || (resolvedElementLogger != null && (logDetail == LocatorLogDetail.CSS_ONLY || logDetail == LocatorLogDetail.BOTH));
 
         String xPath = null;
         String css = null;
 
-        if (needLocators) {
+        if (needXPath) {
             xPath = buildStableXPath(elementInfo, webElement, snapshot);
+        }
+        if (needCss) {
             css = buildStableCssSelector(elementInfo, webElement, snapshot);
         }
 
         if (resolvedElementLogger != null) {
-            resolvedElementLogger.logResolvedElement(intentPhrase, role, xPath, css, elementInfo);
+            String logXPath = (logDetail == LocatorLogDetail.XPATH_ONLY || logDetail == LocatorLogDetail.BOTH) ? xPath : null;
+            String logCss = (logDetail == LocatorLogDetail.CSS_ONLY || logDetail == LocatorLogDetail.BOTH) ? css : null;
+            resolvedElementLogger.logResolvedElement(intentPhrase, role, logXPath, logCss, elementInfo);
         }
 
         if (consistencyCheckEnabled) {
+            // consistency requires BOTH locators, and we ensured they are built above
             runConsistencyCheck(intentPhrase, role, webElement, xPath, css);
         }
 
@@ -456,19 +490,34 @@ public class IntentiumWebDriver {
             return resolveByInternal("PageObject(" + extracted + ")", extracted, forceLocators);
         }
 
-        boolean needLocators = forceLocators || resolvedElementLogger != null || consistencyCheckEnabled;
+        LocatorLogDetail logDetail = currentLogDetail();
 
-        DomElementInfo elementInfo = domMapper.toDomElementInfo(element);
+        boolean needXPath = forceLocators
+                || consistencyCheckEnabled
+                || (resolvedElementLogger != null && (logDetail == LocatorLogDetail.XPATH_ONLY || logDetail == LocatorLogDetail.BOTH));
+
+        boolean needCss = forceLocators
+                || consistencyCheckEnabled
+                || (resolvedElementLogger != null && (logDetail == LocatorLogDetail.CSS_ONLY || logDetail == LocatorLogDetail.BOTH));
+
+        boolean needElementInfo = (resolvedElementLogger != null) || needXPath || needCss;
+
+        DomElementInfo elementInfo = needElementInfo ? domMapper.toDomElementInfo(element) : null;
 
         String xPath = null;
         String css = null;
-        if (needLocators) {
+
+        if (needXPath) {
             xPath = buildQuickXPath(elementInfo, element);
+        }
+        if (needCss) {
             css = buildQuickCssSelector(elementInfo, element);
         }
 
         if (resolvedElementLogger != null) {
-            resolvedElementLogger.logResolvedElement("WebElement", null, xPath, css, elementInfo);
+            String logXPath = (logDetail == LocatorLogDetail.XPATH_ONLY || logDetail == LocatorLogDetail.BOTH) ? xPath : null;
+            String logCss = (logDetail == LocatorLogDetail.CSS_ONLY || logDetail == LocatorLogDetail.BOTH) ? css : null;
+            resolvedElementLogger.logResolvedElement("WebElement", null, logXPath, logCss, elementInfo);
         }
 
         if (consistencyCheckEnabled) {
@@ -479,31 +528,48 @@ public class IntentiumWebDriver {
     }
 
     private ResolvedElement resolveByInternal(String phrase, By by, boolean forceLocators) {
-        boolean needLocators = forceLocators || resolvedElementLogger != null || consistencyCheckEnabled;
+        LocatorLogDetail logDetail = currentLogDetail();
+
+        boolean needXPath = forceLocators
+                || consistencyCheckEnabled
+                || (resolvedElementLogger != null && (logDetail == LocatorLogDetail.XPATH_ONLY || logDetail == LocatorLogDetail.BOTH));
+
+        boolean needCss = forceLocators
+                || consistencyCheckEnabled
+                || (resolvedElementLogger != null && (logDetail == LocatorLogDetail.CSS_ONLY || logDetail == LocatorLogDetail.BOTH));
 
         WebElement element = driver.findElement(by);
-        DomElementInfo elementInfo = domMapper.toDomElementInfo(element);
+
+        boolean needElementInfo = (resolvedElementLogger != null) || needXPath || needCss;
+        DomElementInfo elementInfo = needElementInfo ? domMapper.toDomElementInfo(element) : null;
 
         String xPath = null;
         String css = null;
 
-        if (needLocators) {
+        if (needXPath || needCss) {
             ManualByInfo info = parseManualBy(by);
 
-            if (info.kind == ManualByKind.XPATH) {
-                xPath = info.value;
-                css = buildQuickCssSelector(elementInfo, element);
-            } else if (info.kind == ManualByKind.CSS) {
-                css = info.value;
-                xPath = buildQuickXPath(elementInfo, element);
-            } else {
-                xPath = buildQuickXPath(elementInfo, element);
-                css = buildQuickCssSelector(elementInfo, element);
+            if (needXPath) {
+                if (info.kind == ManualByKind.XPATH) {
+                    xPath = info.value; // manual
+                } else {
+                    xPath = buildQuickXPath(elementInfo, element); // derived
+                }
+            }
+
+            if (needCss) {
+                if (info.kind == ManualByKind.CSS) {
+                    css = info.value; // manual
+                } else {
+                    css = buildQuickCssSelector(elementInfo, element); // derived
+                }
             }
         }
 
         if (resolvedElementLogger != null) {
-            resolvedElementLogger.logResolvedElement(phrase, null, xPath, css, elementInfo);
+            String logXPath = (logDetail == LocatorLogDetail.XPATH_ONLY || logDetail == LocatorLogDetail.BOTH) ? xPath : null;
+            String logCss = (logDetail == LocatorLogDetail.CSS_ONLY || logDetail == LocatorLogDetail.BOTH) ? css : null;
+            resolvedElementLogger.logResolvedElement(phrase, null, logXPath, logCss, elementInfo);
         }
 
         if (consistencyCheckEnabled) {
