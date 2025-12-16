@@ -26,7 +26,13 @@ public final class AllureResolvedElementLogger implements ResolvedElementLogger 
 
     public AllureResolvedElementLogger(WebDriver driver, LocatorLogDetail detail, boolean attachScreenshot) {
         this.driver = Objects.requireNonNull(driver, "driver must not be null");
-        this.detail = detail == null ? LocatorLogDetail.NONE : detail;
+
+        LocatorLogDetail d = detail == null ? LocatorLogDetail.NONE : detail;
+        if (d == LocatorLogDetail.XPATH_AND_CSS) {
+            d = LocatorLogDetail.BOTH;
+        }
+        this.detail = d;
+
         this.attachScreenshot = attachScreenshot;
     }
 
