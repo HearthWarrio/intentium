@@ -27,6 +27,15 @@ public class IntentiumWebDriver {
     private boolean consistencyCheckEnabled = false;
 
     /**
+     * Controls whether Intentium may use likely-hashed CSS class tokens as a last-resort anchor
+     * when building stable derived locators.
+     * <p>
+     * When disabled (default), hashed class tokens are ignored even if they are unique in context.
+     * This prevents “stable” locators from anchoring on generated classes produced by CSS-in-JS/CSS-modules.
+     */
+    private boolean allowHashedLastResort = false;
+
+    /**
      * Snapshot of candidates collected from the current page.
      * <p>
      * Holds:
@@ -85,6 +94,11 @@ public class IntentiumWebDriver {
         ResolvedElementLogger loggerAtResolve;
         boolean consistencyAtResolve;
         ResolvedElement resolved; // resolved WITH locators
+        /**
+         * Stores the hashed-class fallback configuration used at the moment locators were computed.
+         * This is required to keep last-locators cache coherent when configuration changes between calls.
+         */
+        boolean allowHashedLastResortAtResolve;
     }
 
     private final LastLocatorsCache lastLocatorsCache = new LastLocatorsCache();
@@ -136,6 +150,31 @@ public class IntentiumWebDriver {
     public IntentiumWebDriver withConsistencyCheck(boolean enabled) {
         this.consistencyCheckEnabled = enabled;
         return this;
+    }
+
+    /**
+     * Enables or disables usage of likely-hashed CSS class tokens as a last-resort anchor
+     * in stable XPath and CSS selector builders.
+     * <p>
+     * Default is {@code false}.
+     *
+     * @param allowHashedLastResort whether hashed-class fallback is allowed as a last resort
+     * @return this driver instance for fluent chaining
+     */
+    public IntentiumWebDriver withAllowHashedLastResort(boolean allowHashedLastResort) {
+        this.allowHashedLastResort = allowHashedLastResort;
+        return this;
+    }
+
+    /**
+     * Returns the current setting for hashed-class last-resort fallback.
+     * <p>
+     * Package-private by design to allow {@link ActionsChain} to temporarily override and restore it.
+     *
+     * @return {@code true} if hashed-class last-resort fallback is enabled
+     */
+    boolean isAllowHashedLastResortEnabled() {
+        return allowHashedLastResort;
     }
 
     // ----------- configuration (sugar, minimal set) -----------
@@ -447,6 +486,10 @@ public class IntentiumWebDriver {
         if (lastLocatorsCache.resolved.xPath == null || lastLocatorsCache.resolved.cssSelector == null) {
             return null;
         }
+        if (lastLocatorsCache.allowHashedLastResortAtResolve != allowHashedLastResort) {
+            return null;
+        }
+
         return lastLocatorsCache.resolved;
     }
 
@@ -456,6 +499,7 @@ public class IntentiumWebDriver {
         lastLocatorsCache.loggerAtResolve = resolvedElementLogger;
         lastLocatorsCache.consistencyAtResolve = consistencyCheckEnabled;
         lastLocatorsCache.resolved = resolved;
+        lastLocatorsCache.allowHashedLastResortAtResolve = allowHashedLastResort;
     }
 
     // ----------- PageObject / manual target resolve -----------
@@ -802,7 +846,7 @@ public class IntentiumWebDriver {
         }
 
         // Pass 2 (last resort) – allow hashed unique class token ONLY when otherwise we'd return //tag
-        String hashedClassToken = pickUniqueClassToken(snapshot, tag, formKey, cssClasses, true);
+        String hashedClassToken = pickUniqueClassToken(snapshot, tag, formKey, cssClasses, allowHashedLastResort);
         if (hashedClassToken != null) {
             String classPredicate = "contains(concat(' ', normalize-space(@class), ' '), " +
                     xpathLiteral(" " + hashedClassToken + " ") + ")";
@@ -885,7 +929,7 @@ public class IntentiumWebDriver {
         }
 
         // Pass 2 (last resort) – allow hashed unique class token ONLY when otherwise we'd return tag
-        String hashedClassToken = pickUniqueClassToken(snapshot, tag, formKey, cssClasses, true);
+        String hashedClassToken = pickUniqueClassToken(snapshot, tag, formKey, cssClasses, allowHashedLastResort);
         if (hashedClassToken != null) {
             return cssWithFormPrefix(form, tag + "." + cssEscapeIdentifier(hashedClassToken));
         }
