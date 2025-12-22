@@ -33,6 +33,13 @@ public final class ActionsChain {
     private ResolvedElementLogger loggerOverrideValue = null;
 
     /**
+     * Optional per-chain override for {@link IntentiumWebDriver#withAllowHashedLastResort(boolean)}.
+     * When set, the chain applies the override for {@link #perform()} execution and restores
+     * the original driver value afterwards.
+     */
+    private Boolean allowHashedLastResortOverride;
+
+    /**
      * Tri-state:
      * null – no override, keep driver setting
      * true/false – override for this chain execution
@@ -174,11 +181,25 @@ public final class ActionsChain {
     }
 
     /**
+     * Overrides hashed-class last-resort fallback policy for this chain execution.
+     * <p>
+     * The override is applied only for the duration of {@link #perform()} and then reverted.
+     *
+     * @param allowHashedLastResort whether hashed-class fallback is allowed as a last resort
+     * @return this chain instance for fluent chaining
+     */
+    public ActionsChain withAllowHashedLastResort(boolean allowHashedLastResort) {
+        this.allowHashedLastResortOverride = allowHashedLastResort;
+        return this;
+    }
+
+    /**
      * Executes all accumulated steps.
      */
     public void perform() {
         ResolvedElementLogger originalLogger = intentium.getResolvedElementLogger();
         boolean originalConsistency = intentium.isConsistencyCheckEnabled();
+        boolean originalAllowHashedLastResort = intentium.isAllowHashedLastResortEnabled();
 
         ExecutionContext ctx = ExecutionContext.create(intentium);
 
@@ -188,6 +209,9 @@ public final class ActionsChain {
             }
             if (consistencyOverride != null) {
                 intentium.withConsistencyCheck(consistencyOverride);
+            }
+            if (allowHashedLastResortOverride != null) {
+                intentium.withAllowHashedLastResort(allowHashedLastResortOverride);
             }
 
             for (Consumer<ExecutionContext> step : steps) {
@@ -200,8 +224,12 @@ public final class ActionsChain {
             if (consistencyOverride != null) {
                 intentium.withConsistencyCheck(originalConsistency);
             }
+            if (allowHashedLastResortOverride != null) {
+                intentium.withAllowHashedLastResort(originalAllowHashedLastResort);
+            }
         }
     }
+
 
     /**
      * Convenience: add click for current target and execute chain immediately.
