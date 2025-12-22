@@ -728,13 +728,15 @@ public class IntentiumWebDriver {
             return "//*[@id=" + xpathLiteral(id) + "]";
         }
 
+        // test/qa – immediately after id
         String testAttrName = safe(info == null ? null : info.getTestAttributeName());
         String testAttrValue = safe(info == null ? null : info.getTestAttributeValue());
         if (!testAttrName.isBlank() && !testAttrValue.isBlank()) {
             if (isUniqueInContext(snapshot, tag, formKey,
                     DomElementInfo::getTestAttributeName, testAttrName,
                     DomElementInfo::getTestAttributeValue, testAttrValue)) {
-                return xPathWithFormPrefix(form, "//" + tag + "[@" + testAttrName + "=" + xpathLiteral(testAttrValue) + "]");
+                return xPathWithFormPrefix(form,
+                        "//" + tag + "[@" + testAttrName + "=" + xpathLiteral(testAttrValue) + "]");
             }
         }
 
@@ -776,7 +778,8 @@ public class IntentiumWebDriver {
                     "[@title=" + xpathLiteral(title) + " and @type=" + xpathLiteral(type) + "]");
         }
 
-        String classToken = pickUniqueClassToken(snapshot, tag, formKey, cssClasses);
+        // Pass 1 – ONLY non-hashed unique class token
+        String classToken = pickUniqueClassToken(snapshot, tag, formKey, cssClasses, false);
         if (classToken != null) {
             String classPredicate = "contains(concat(' ', normalize-space(@class), ' '), " +
                     xpathLiteral(" " + classToken + " ") + ")";
@@ -798,8 +801,17 @@ public class IntentiumWebDriver {
             return xPathWithFormPrefix(form, "(" + base + ")[" + ordinal + "]");
         }
 
+        // Pass 2 (last resort) – allow hashed unique class token ONLY when otherwise we'd return //tag
+        String hashedClassToken = pickUniqueClassToken(snapshot, tag, formKey, cssClasses, true);
+        if (hashedClassToken != null) {
+            String classPredicate = "contains(concat(' ', normalize-space(@class), ' '), " +
+                    xpathLiteral(" " + hashedClassToken + " ") + ")";
+            return xPathWithFormPrefix(form, "//" + tag + "[" + classPredicate + "]");
+        }
+
         return xPathWithFormPrefix(form, "//" + tag);
     }
+
 
     String buildStableCssSelector(DomElementInfo info, WebElement element, CandidatesSnapshot snapshot) {
         String tag = safeTagName(info, element);
@@ -812,13 +824,15 @@ public class IntentiumWebDriver {
             return "#" + cssEscapeIdentifier(id);
         }
 
+        // test/qa – immediately after id
         String testAttrName = safe(info == null ? null : info.getTestAttributeName());
         String testAttrValue = safe(info == null ? null : info.getTestAttributeValue());
         if (!testAttrName.isBlank() && !testAttrValue.isBlank()) {
             if (isUniqueInContext(snapshot, tag, formKey,
                     DomElementInfo::getTestAttributeName, testAttrName,
                     DomElementInfo::getTestAttributeValue, testAttrValue)) {
-                return cssWithFormPrefix(form, tag + "[" + testAttrName + "=" + cssAttrLiteral(testAttrValue) + "]");
+                return cssWithFormPrefix(form,
+                        tag + "[" + testAttrName + "=" + cssAttrLiteral(testAttrValue) + "]");
             }
         }
 
@@ -859,17 +873,26 @@ public class IntentiumWebDriver {
                     "[title=" + cssAttrLiteral(title) + "][type=" + cssAttrLiteral(type) + "]");
         }
 
-        String classToken = pickUniqueClassToken(snapshot, tag, formKey, cssClasses);
+        // Pass 1 – ONLY non-hashed unique class token
+        String classToken = pickUniqueClassToken(snapshot, tag, formKey, cssClasses, false);
         if (classToken != null) {
             return cssWithFormPrefix(form, tag + "." + cssEscapeIdentifier(classToken));
         }
 
+        // try type uniqueness before allowing hashed
         if (!type.isBlank() && isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getType, type)) {
             return cssWithFormPrefix(form, tag + "[type=" + cssAttrLiteral(type) + "]");
         }
 
+        // Pass 2 (last resort) – allow hashed unique class token ONLY when otherwise we'd return tag
+        String hashedClassToken = pickUniqueClassToken(snapshot, tag, formKey, cssClasses, true);
+        if (hashedClassToken != null) {
+            return cssWithFormPrefix(form, tag + "." + cssEscapeIdentifier(hashedClassToken));
+        }
+
         return cssWithFormPrefix(form, tag);
     }
+
 
     // ----------- context helpers -----------
 
@@ -1066,6 +1089,17 @@ public class IntentiumWebDriver {
     }
 
     private String pickUniqueClassToken(CandidatesSnapshot snapshot, String tag, String formIdentifier, String cssClasses) {
+        // default behavior preserved for any internal callers
+        return pickUniqueClassToken(snapshot, tag, formIdentifier, cssClasses, true);
+    }
+
+    private String pickUniqueClassToken(
+            CandidatesSnapshot snapshot,
+            String tag,
+            String formIdentifier,
+            String cssClasses,
+            boolean allowHashedLastResort
+    ) {
         if (snapshot == null || snapshot.domCandidates == null) {
             return null;
         }
@@ -1074,15 +1108,160 @@ public class IntentiumWebDriver {
         }
 
         String[] tokens = cssClasses.trim().split("\\s+");
+
+        // Pass 1: prefer unique non-hashed tokens
         for (String token : tokens) {
             if (token == null || token.isBlank()) {
+                continue;
+            }
+            if (isProbablyHashedCssClassToken(token)) {
                 continue;
             }
             if (isUniqueClassTokenInContext(snapshot, tag, formIdentifier, token)) {
                 return token;
             }
         }
+
+        if (!allowHashedLastResort) {
+            return null;
+        }
+
+        // Pass 2: allow unique hashed tokens only when explicitly permitted
+        for (String token : tokens) {
+            if (token == null || token.isBlank()) {
+                continue;
+            }
+            if (!isProbablyHashedCssClassToken(token)) {
+                continue;
+            }
+            if (isUniqueClassTokenInContext(snapshot, tag, formIdentifier, token)) {
+                return token;
+            }
+        }
+
         return null;
+    }
+
+    private boolean isProbablyHashedCssClassToken(String token) {
+        if (token == null) {
+            return false;
+        }
+        String t = token.trim();
+        if (t.isEmpty() || t.length() < 5) {
+            return false;
+        }
+
+        // Emotion / similar: css-<alnum...> (жёстко)
+        if (t.startsWith("css-")) {
+            String tail = t.substring(4);
+            return tail.length() >= 5 && isAlphaNumOnly(tail);
+        }
+
+        // styled-components: sc-AxhCb / sc-hKMtZM (часто смешанный регистр и/или цифры)
+        if (t.startsWith("sc-")) {
+            String tail = t.substring(3);
+            if (tail.length() >= 5 && tail.length() <= 12 && isAlphaNumOnly(tail)) {
+                boolean hasUpper = false;
+                boolean hasLower = false;
+                int digits = 0;
+                for (int i = 0; i < tail.length(); i++) {
+                    char c = tail.charAt(i);
+                    if (Character.isDigit(c)) {
+                        digits++;
+                    } else if (Character.isUpperCase(c)) {
+                        hasUpper = true;
+                    } else if (Character.isLowerCase(c)) {
+                        hasLower = true;
+                    }
+                }
+                return (hasUpper && hasLower) || (digits >= 2);
+            }
+            return false;
+        }
+
+        // CSS Modules / similar: Button_root__3x9aF, block--a1B2c3
+        int idx = Math.max(t.lastIndexOf("__"), t.lastIndexOf("--"));
+        if (idx >= 0 && idx + 2 < t.length()) {
+            String tail = t.substring(idx + 2);
+            if (looksHashTail(tail)) {
+                return true;
+            }
+        }
+
+        // Часто: _3x9aF / _a1B2c3D4
+        if (t.charAt(0) == '_' && looksHashTail(t.substring(1))) {
+            return true;
+        }
+
+        // Чистый hex-токен: hashed только если >= 8 и есть цифра
+        return isHexLike(t) && t.length() >= 8 && containsDigit(t);
+    }
+
+    private boolean isHexLike(String s) {
+        if (s == null) {
+            return false;
+        }
+        String t = s.trim();
+        if (t.length() < 6) {
+            return false;
+        }
+        for (int i = 0; i < t.length(); i++) {
+            char c = Character.toLowerCase(t.charAt(i));
+            boolean ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+            if (!ok) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean looksHashTail(String tail) {
+        if (tail == null) {
+            return false;
+        }
+        String s = tail.trim();
+        if (s.length() < 5) {
+            return false;
+        }
+
+        int digits = 0;
+        int letters = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (Character.isDigit(c)) {
+                digits++;
+            } else if (Character.isLetter(c)) {
+                letters++;
+            } else {
+                return false;
+            }
+        }
+        return digits >= 2 && letters >= 2;
+    }
+
+    private boolean isAlphaNumOnly(String s) {
+        if (s == null || s.isEmpty()) {
+            return false;
+        }
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (!Character.isLetterOrDigit(c)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean containsDigit(String s) {
+        if (s == null || s.isEmpty()) {
+            return false;
+        }
+        for (int i = 0; i < s.length(); i++) {
+            if (Character.isDigit(s.charAt(i))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean isUniqueClassTokenInContext(
