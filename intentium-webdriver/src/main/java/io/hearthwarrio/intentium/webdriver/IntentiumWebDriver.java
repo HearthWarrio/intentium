@@ -172,10 +172,16 @@ public class IntentiumWebDriver {
     }
 
     /**
-     * Enables or disables usage of likely-hashed CSS class tokens as a last-resort anchor
-     * in stable XPath and CSS selector builders.
+     * Enables or disables usage of likely-hashed CSS class tokens as a strict last-resort anchor when building derived
+     * "stable" locators.
      * <p>
-     * Default is {@code false}.
+     * When disabled (default), hashed class tokens are ignored even if they are unique in context. This prevents derived
+     * locators from anchoring on build-generated classes produced by CSS-in-JS and CSS Modules.
+     * <p>
+     * When enabled, hashed tokens may be used only after all higher-quality anchors have been exhausted and only when the
+     * alternative fallback would be a bare {@code //tag} (XPath) or {@code tag} (CSS).
+     * <p>
+     * For chain execution, this setting can be overridden per chain via {@link ActionsChain#withAllowHashedLastResort(boolean)}.
      *
      * @param allowHashedLastResort whether hashed-class fallback is allowed as a last resort
      * @return this driver instance for fluent chaining
@@ -1023,6 +1029,33 @@ public class IntentiumWebDriver {
 
     // ----------- locator builders -----------
 
+    /**
+     * Builds a best-effort "stable" XPath for the resolved element.
+     * <p>
+     * The builder prefers semantically meaningful anchors and avoids generated (hashed) CSS classes by default.
+     * Hashed tokens are considered only as a strict last-resort fallback and only when enabled via
+     * {@link #withAllowHashedLastResort(boolean)}.
+     * <p>
+     * Resolution order (simplified):
+     * <ol>
+     *   <li>{@code id}</li>
+     *   <li>test/qa attribute (for example, {@code data-testid}, {@code data-qa})</li>
+     *   <li>{@code name}, {@code aria-label}, {@code placeholder}, {@code title} (unique in context)</li>
+     *   <li>the same attributes combined with {@code type} (unique in context)</li>
+     *   <li>a unique non-hashed CSS class token (unique in context)</li>
+     *   <li>label-based fallback (a {@code label} followed by the target tag)</li>
+     *   <li>ordinal fallback within context</li>
+     *   <li>a unique hashed CSS class token as a strict last resort (only when allowed)</li>
+     *   <li>bare {@code //tag} fallback</li>
+     * </ol>
+     * <p>
+     * Context includes the enclosing form identifier when available to reduce collisions on pages with repeated forms.
+     *
+     * @param info resolved DOM info snapshot for the element
+     * @param element resolved Selenium element
+     * @param snapshot candidates snapshot of the current page
+     * @return best-effort stable XPath
+     */
     String buildStableXPath(DomElementInfo info, WebElement element, CandidatesSnapshot snapshot) {
         String tag = safeTagName(info, element);
 
@@ -1034,7 +1067,6 @@ public class IntentiumWebDriver {
             return "//*[@id=" + xpathLiteral(id) + "]";
         }
 
-        // test/qa – immediately after id
         String testAttrName = safe(info == null ? null : info.getTestAttributeName());
         String testAttrValue = safe(info == null ? null : info.getTestAttributeValue());
         if (!testAttrName.isBlank() && !testAttrValue.isBlank()) {
@@ -1084,7 +1116,6 @@ public class IntentiumWebDriver {
                     "[@title=" + xpathLiteral(title) + " and @type=" + xpathLiteral(type) + "]");
         }
 
-        // Pass 1 – ONLY non-hashed unique class token
         String classToken = pickUniqueClassToken(snapshot, tag, formKey, cssClasses, false);
         if (classToken != null) {
             String classPredicate = "contains(concat(' ', normalize-space(@class), ' '), " +
@@ -1107,7 +1138,6 @@ public class IntentiumWebDriver {
             return xPathWithFormPrefix(form, "(" + base + ")[" + ordinal + "]");
         }
 
-        // Pass 2 (last resort) – allow hashed unique class token ONLY when otherwise we'd return //tag
         String hashedClassToken = pickUniqueClassToken(snapshot, tag, formKey, cssClasses, allowHashedLastResort);
         if (hashedClassToken != null) {
             String classPredicate = "contains(concat(' ', normalize-space(@class), ' '), " +
@@ -1119,6 +1149,32 @@ public class IntentiumWebDriver {
     }
 
 
+    /**
+     * Builds a best-effort "stable" CSS selector for the resolved element.
+     * <p>
+     * The builder prefers semantically meaningful anchors and avoids generated (hashed) CSS classes by default.
+     * Hashed tokens are considered only as a strict last-resort fallback and only when enabled via
+     * {@link #withAllowHashedLastResort(boolean)}.
+     * <p>
+     * Resolution order (simplified):
+     * <ol>
+     *   <li>{@code id}</li>
+     *   <li>test/qa attribute (for example, {@code data-testid}, {@code data-qa})</li>
+     *   <li>{@code name}, {@code aria-label}, {@code placeholder}, {@code title} (unique in context)</li>
+     *   <li>the same attributes combined with {@code type} (unique in context)</li>
+     *   <li>a unique non-hashed CSS class token (unique in context)</li>
+     *   <li>{@code type} uniqueness (when applicable)</li>
+     *   <li>a unique hashed CSS class token as a strict last resort (only when allowed)</li>
+     *   <li>bare {@code tag} fallback</li>
+     * </ol>
+     * <p>
+     * Context includes the enclosing form identifier when available to reduce collisions on pages with repeated forms.
+     *
+     * @param info resolved DOM info snapshot for the element
+     * @param element resolved Selenium element
+     * @param snapshot candidates snapshot of the current page
+     * @return best-effort stable CSS selector
+     */
     String buildStableCssSelector(DomElementInfo info, WebElement element, CandidatesSnapshot snapshot) {
         String tag = safeTagName(info, element);
 
@@ -1130,7 +1186,6 @@ public class IntentiumWebDriver {
             return "#" + cssEscapeIdentifier(id);
         }
 
-        // test/qa – immediately after id
         String testAttrName = safe(info == null ? null : info.getTestAttributeName());
         String testAttrValue = safe(info == null ? null : info.getTestAttributeValue());
         if (!testAttrName.isBlank() && !testAttrValue.isBlank()) {
@@ -1179,18 +1234,15 @@ public class IntentiumWebDriver {
                     "[title=" + cssAttrLiteral(title) + "][type=" + cssAttrLiteral(type) + "]");
         }
 
-        // Pass 1 – ONLY non-hashed unique class token
         String classToken = pickUniqueClassToken(snapshot, tag, formKey, cssClasses, false);
         if (classToken != null) {
             return cssWithFormPrefix(form, tag + "." + cssEscapeIdentifier(classToken));
         }
 
-        // try type uniqueness before allowing hashed
         if (!type.isBlank() && isUniqueInContext(snapshot, tag, formKey, DomElementInfo::getType, type)) {
             return cssWithFormPrefix(form, tag + "[type=" + cssAttrLiteral(type) + "]");
         }
 
-        // Pass 2 (last resort) – allow hashed unique class token ONLY when otherwise we'd return tag
         String hashedClassToken = pickUniqueClassToken(snapshot, tag, formKey, cssClasses, allowHashedLastResort);
         if (hashedClassToken != null) {
             return cssWithFormPrefix(form, tag + "." + cssEscapeIdentifier(hashedClassToken));
@@ -1395,7 +1447,6 @@ public class IntentiumWebDriver {
     }
 
     private String pickUniqueClassToken(CandidatesSnapshot snapshot, String tag, String formIdentifier, String cssClasses) {
-        // default behavior preserved for any internal callers
         return pickUniqueClassToken(snapshot, tag, formIdentifier, cssClasses, true);
     }
 
@@ -1415,7 +1466,6 @@ public class IntentiumWebDriver {
 
         String[] tokens = cssClasses.trim().split("\\s+");
 
-        // Pass 1: prefer unique non-hashed tokens
         for (String token : tokens) {
             if (token == null || token.isBlank()) {
                 continue;
@@ -1432,7 +1482,6 @@ public class IntentiumWebDriver {
             return null;
         }
 
-        // Pass 2: allow unique hashed tokens only when explicitly permitted
         for (String token : tokens) {
             if (token == null || token.isBlank()) {
                 continue;
@@ -1448,6 +1497,25 @@ public class IntentiumWebDriver {
         return null;
     }
 
+    /**
+     * Heuristic detector for likely-generated ("hashed") CSS class tokens produced by CSS-in-JS, CSS Modules and similar
+     * toolchains.
+     * <p>
+     * The detector is intentionally conservative: false positives would exclude legitimate stable classes from locator
+     * building. The goal is to avoid anchoring "stable" locators on volatile, build-generated class names.
+     * <p>
+     * Examples of patterns treated as likely-hashed (best-effort):
+     * <ul>
+     *   <li>Emotion-like: {@code css-<alnum>}</li>
+     *   <li>styled-components-like: {@code sc-<alnum>}</li>
+     *   <li>CSS Modules-like: token containing {@code __} with a hashed suffix (for example, {@code Button_root__3x9aF})</li>
+     *   <li>underscore-prefixed short tokens (for example, {@code _3x9aF})</li>
+     *   <li>hex-like tokens (length &ge; 8, contains digits)</li>
+     * </ul>
+     *
+     * @param token single class token (not the full {@code class} attribute)
+     * @return {@code true} if the token likely represents a generated/hash-like class name
+     */
     private boolean isProbablyHashedCssClassToken(String token) {
         if (token == null) {
             return false;
@@ -1456,14 +1524,10 @@ public class IntentiumWebDriver {
         if (t.isEmpty() || t.length() < 5) {
             return false;
         }
-
-        // Emotion / similar: css-<alnum...> (жёстко)
         if (t.startsWith("css-")) {
             String tail = t.substring(4);
             return tail.length() >= 5 && isAlphaNumOnly(tail);
         }
-
-        // styled-components: sc-AxhCb / sc-hKMtZM (часто смешанный регистр и/или цифры)
         if (t.startsWith("sc-")) {
             String tail = t.substring(3);
             if (tail.length() >= 5 && tail.length() <= 12 && isAlphaNumOnly(tail)) {
@@ -1484,8 +1548,6 @@ public class IntentiumWebDriver {
             }
             return false;
         }
-
-        // CSS Modules / similar: Button_root__3x9aF, block--a1B2c3
         int idx = Math.max(t.lastIndexOf("__"), t.lastIndexOf("--"));
         if (idx >= 0 && idx + 2 < t.length()) {
             String tail = t.substring(idx + 2);
@@ -1493,13 +1555,9 @@ public class IntentiumWebDriver {
                 return true;
             }
         }
-
-        // Часто: _3x9aF / _a1B2c3D4
         if (t.charAt(0) == '_' && looksHashTail(t.substring(1))) {
             return true;
         }
-
-        // Чистый hex-токен: hashed только если >= 8 и есть цифра
         return isHexLike(t) && t.length() >= 8 && containsDigit(t);
     }
 

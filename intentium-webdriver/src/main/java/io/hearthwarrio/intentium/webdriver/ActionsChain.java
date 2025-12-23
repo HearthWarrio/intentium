@@ -206,6 +206,10 @@ public final class ActionsChain {
     /**
      * Overrides hashed-class last-resort fallback policy for this chain execution.
      * <p>
+     * When enabled, derived locator builders may use likely-hashed CSS class tokens only as a strict last resort and only
+     * when the alternative fallback would be a bare {@code //tag} (XPath) or {@code tag} (CSS). When disabled, hashed
+     * tokens are ignored even if unique.
+     * <p>
      * The override is applied only for the duration of {@link #perform()} and then reverted.
      *
      * @param allowHashedLastResort whether hashed-class fallback is allowed as a last resort
