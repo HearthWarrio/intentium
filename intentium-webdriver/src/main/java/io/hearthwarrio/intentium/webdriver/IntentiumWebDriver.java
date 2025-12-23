@@ -10,6 +10,12 @@ import java.util.*;
 
 /**
  * High-level Intentium entry point for Selenium WebDriver.
+ * <p>
+ * Intentium can treat project-specific "test/qa attributes" (for example, {@code data-testid}, {@code data-qa})
+ * as a strong semantic signal during DOM snapshotting. Use {withTestAttributeWhitelist(String...)} to
+ * configure the whitelist or disable it.
+ * <p>
+ * This class is not thread-safe and is expected to be used from a single test thread.
  */
 public class IntentiumWebDriver {
 
@@ -17,6 +23,14 @@ public class IntentiumWebDriver {
     private final Language language;
     private final IntentResolver intentResolver;
     private final ElementSelector elementSelector;
+    /**
+     * Whitelist of attribute names considered "test/qa hooks" (for example, {@code data-testid}, {@code data-qa}).
+     * <p>
+     * The order matters: the first present attribute wins.
+     * <p>
+     * Mutated by {withTestAttributeWhitelist(String...)}.
+     */
+    private final List<String> testAttributeWhitelist = new ArrayList<>(WebDriverDomMapper.DEFAULT_TEST_ATTRIBUTE_WHITELIST);
     private final WebDriverDomMapper domMapper;
 
     /**
@@ -131,7 +145,7 @@ public class IntentiumWebDriver {
         this.language = Objects.requireNonNull(language, "language must not be null");
         this.intentResolver = Objects.requireNonNull(intentResolver, "intentResolver must not be null");
         this.elementSelector = Objects.requireNonNull(elementSelector, "elementSelector must not be null");
-        this.domMapper = new WebDriverDomMapper(driver);
+        this.domMapper = new WebDriverDomMapper(driver, testAttributeWhitelist);
         this.resolvedElementLogger = logger;
     }
 
@@ -163,6 +177,58 @@ public class IntentiumWebDriver {
      */
     public IntentiumWebDriver withAllowHashedLastResort(boolean allowHashedLastResort) {
         this.allowHashedLastResort = allowHashedLastResort;
+        return this;
+    }
+
+    /**
+     * Returns the current whitelist of "test/qa" attributes used during DOM snapshotting.
+     * <p>
+     * The returned list is read-only.
+     *
+     * @return current whitelist (possibly empty)
+     */
+    public List<String> getTestAttributeWhitelist() {
+        return Collections.unmodifiableList(testAttributeWhitelist);
+    }
+
+    /**
+     * Configures whitelist of project-specific test/qa attributes (for example, {@code data-testid}, {@code data-qa}).
+     * <p>
+     * The order matters: the first present attribute wins.
+     * <p>
+     * Blank names are ignored, duplicates are removed (keeping the first occurrence).
+     * <p>
+     * Passing an empty whitelist disables test attribute detection completely.
+     *
+     * @param attributeNames attribute names in priority order
+     * @return this driver instance for chaining
+     */
+    public IntentiumWebDriver withTestAttributeWhitelist(String... attributeNames) {
+        Objects.requireNonNull(attributeNames, "attributeNames must not be null");
+        return withTestAttributeWhitelist(Arrays.asList(attributeNames));
+    }
+
+    /**
+     * Same as {@link #withTestAttributeWhitelist(String...)} but accepts a list.
+     *
+     * @param attributeNames attribute names in priority order
+     * @return this driver instance for chaining
+     */
+    public IntentiumWebDriver withTestAttributeWhitelist(List<String> attributeNames) {
+        Objects.requireNonNull(attributeNames, "attributeNames must not be null");
+        testAttributeWhitelist.clear();
+        for (String raw : attributeNames) {
+            if (raw == null) {
+                continue;
+            }
+            String name = raw.trim();
+            if (name.isEmpty()) {
+                continue;
+            }
+            if (!testAttributeWhitelist.contains(name)) {
+                testAttributeWhitelist.add(name);
+            }
+        }
         return this;
     }
 

@@ -13,6 +13,8 @@ import java.util.Objects;
 
 /**
  * Maps Selenium {@link WebElement} to {@link DomElementInfo} snapshots.
+ * <p>
+ * This class is not thread-safe and is expected to be used from a single test thread.
  */
 public class WebDriverDomMapper {
 
@@ -20,10 +22,14 @@ public class WebDriverDomMapper {
     private static final String HINT_SUFFIX = "]";
 
     /**
-     * Common attributes used for test automation hooks.
-     * If present, Intentium treats them as a strong semantic signal.
+     * Default whitelist of "test/qa" attributes (for example, {@code data-testid}, {@code data-test-id}, {@code data-qa}).
+     * <p>
+     * The order matters: the first present attribute wins.
+     * <p>
+     * This list is immutable. If you need a custom set, pass your own list via
+     * {@link #WebDriverDomMapper(WebDriver, List)}.
      */
-    private static final String[] TEST_ATTR_CANDIDATES = new String[]{
+    public static final List<String> DEFAULT_TEST_ATTRIBUTE_WHITELIST = List.of(
             "data-testid",
             "data-test-id",
             "data-test",
@@ -31,7 +37,7 @@ public class WebDriverDomMapper {
             "data-cy",
             "data-automation-id",
             "data-automation"
-    };
+    );
 
     private static final class TestAttribute {
         final String name;
@@ -49,10 +55,35 @@ public class WebDriverDomMapper {
 
     private final WebDriver driver;
     private final JavascriptExecutor js;
+    private final List<String> testAttributeWhitelist;
 
+    /**
+     * Creates a mapper with the default test attribute whitelist.
+     *
+     * @param driver Selenium WebDriver instance
+     */
     public WebDriverDomMapper(WebDriver driver) {
+        this(driver, new ArrayList<>(DEFAULT_TEST_ATTRIBUTE_WHITELIST));
+    }
+
+    /**
+     * Creates a DOM mapper with a configurable whitelist of test attributes.
+     * <p>
+     * The order matters: the first present attribute wins.
+     * <p>
+     * The provided list instance is used as-is (no defensive copy). This allows configuration to be changed at runtime
+     * by mutating the list (for example, via { IntentiumWebDriver#withTestAttributeWhitelist(String...)}).
+     *
+     * @param driver Selenium WebDriver instance
+     * @param testAttributeWhitelist whitelist of attribute names; empty list disables test attribute detection
+     */
+    public WebDriverDomMapper(WebDriver driver, List<String> testAttributeWhitelist) {
         this.driver = Objects.requireNonNull(driver, "driver must not be null");
         this.js = (JavascriptExecutor) driver;
+        this.testAttributeWhitelist = Objects.requireNonNull(
+                testAttributeWhitelist,
+                "testAttributeWhitelist must not be null"
+        );
     }
 
     /**
@@ -62,7 +93,7 @@ public class WebDriverDomMapper {
         private final DomElementInfo info;
         private final WebElement element;
 
-        public Candidate(DomElementInfo info, WebElement element) {
+        Candidate(DomElementInfo info, WebElement element) {
             this.info = info;
             this.element = element;
         }
@@ -76,20 +107,30 @@ public class WebDriverDomMapper {
         }
     }
 
+    /**
+     * Collects Selenium candidates and maps them to {@link DomElementInfo}.
+     *
+     * @return list of candidates; may be empty when DOM is not accessible
+     */
     public List<Candidate> collectCandidateList() {
-        List<WebElement> elements = collectDomCandidates();
-        if (elements.isEmpty()) {
+        List<WebElement> candidates = collectDomCandidates();
+        if (candidates.isEmpty()) {
             return Collections.emptyList();
         }
 
-        List<Candidate> out = new ArrayList<>(elements.size());
-        for (WebElement e : elements) {
-            DomElementInfo info = toDomElementInfo(e);
-            out.add(new Candidate(info, e));
+        List<Candidate> out = new ArrayList<>(candidates.size());
+        for (WebElement element : candidates) {
+            out.add(new Candidate(toDomElementInfo(element), element));
         }
         return out;
     }
 
+    /**
+     * Builds {@link DomElementInfo} for a single {@link WebElement}.
+     *
+     * @param element Selenium element
+     * @return DOM snapshot for scoring/resolution
+     */
     public DomElementInfo toDomElementInfo(WebElement element) {
         String tagName = safe(element.getTagName());
         String type = attr(element, "type");
@@ -107,7 +148,6 @@ public class WebDriverDomMapper {
 
         String labelText = resolveAssociatedLabelText(element);
         String surroundingText = resolveSurroundingText(element);
-
         String formIdentifier = resolveFormIdentifier(element);
 
         return new DomElementInfo(
@@ -127,28 +167,31 @@ public class WebDriverDomMapper {
         );
     }
 
+    /**
+     * Collects a broad set of DOM candidates.
+     * <p>
+     * Selector/scorer is expected to down-rank irrelevant elements.
+     *
+     * @return list of elements; may be empty
+     */
     private List<WebElement> collectDomCandidates() {
-        // Keep this broad: selector/scorer will down-rank junk.
-        // You likely already have a tuned list in your version – keep it if it works.
-        String css = String.join(",",
-                "input",
-                "button",
-                "textarea",
-                "select",
-                "a",
-                "[role='button']",
-                "[role='textbox']",
-                "[contenteditable='true']"
-        );
         try {
-            return driver.findElements(By.cssSelector(css));
+            return driver.findElements(By.cssSelector("*"));
         } catch (RuntimeException e) {
             return Collections.emptyList();
         }
     }
 
+    /**
+     * Resolves test/qa attribute name/value using {@link #testAttributeWhitelist}.
+     * <p>
+     * First present attribute wins.
+     *
+     * @param element Selenium element
+     * @return resolved attribute pair or empty pair when not found
+     */
     private TestAttribute resolveTestAttribute(WebElement element) {
-        for (String attrName : TEST_ATTR_CANDIDATES) {
+        for (String attrName : testAttributeWhitelist) {
             if (attrName == null || attrName.isBlank()) {
                 continue;
             }
@@ -178,62 +221,100 @@ public class WebDriverDomMapper {
             String id = attr(element, "id");
             if (!id.isBlank()) {
                 List<WebElement> labels = driver.findElements(By.cssSelector("label[for='" + cssEscape(id) + "']"));
-                if (!labels.isEmpty()) {
-                    return normalizeText(safe(labels.get(0).getText()));
+                for (WebElement label : labels) {
+                    String t = normalizeText(label.getText());
+                    if (!t.isBlank()) {
+                        return t;
+                    }
                 }
             }
-        } catch (Exception ignored) {
-            // ignore
-        }
 
-        try {
-            WebElement label = element.findElement(By.xpath("ancestor::label[1]"));
-            return normalizeText(safe(label.getText()));
-        } catch (Exception ignored) {
+            WebElement parentLabel = (WebElement) js.executeScript(
+                    "return arguments[0].closest('label');",
+                    element
+            );
+            if (parentLabel != null) {
+                String t = normalizeText(parentLabel.getText());
+                if (!t.isBlank()) {
+                    return t;
+                }
+            }
+        } catch (RuntimeException e) {
             return "";
         }
+        return "";
     }
 
     private String resolveSurroundingText(WebElement element) {
         try {
-            Object v = js.executeScript(
-                    "var el=arguments[0];" +
-                            "function txt(n){return (n && n.innerText) ? n.innerText : '';} " +
-                            "return (txt(el.parentElement) || '') + ' ' + (txt(el.previousElementSibling) || '') + ' ' + (txt(el.nextElementSibling) || '');",
+            String hint = (String) js.executeScript(
+                    "var el = arguments[0];" +
+                            "function textOf(n){ return (n && n.textContent) ? n.textContent.trim() : ''; }" +
+                            "var before = '';" +
+                            "var after = '';" +
+                            "if (el && el.parentElement) {" +
+                            "  var p = el.parentElement;" +
+                            "  var kids = Array.prototype.slice.call(p.childNodes || []);" +
+                            "  var idx = kids.indexOf(el);" +
+                            "  if (idx > 0) before = textOf(kids[idx-1]);" +
+                            "  if (idx >= 0 && idx < kids.length-1) after = textOf(kids[idx+1]);" +
+                            "}" +
+                            "var b = before.replace(/\\s+/g,' ').trim();" +
+                            "var a = after.replace(/\\s+/g,' ').trim();" +
+                            "var r = '';" +
+                            "if (b) r += '" + HINT_PREFIX + "before=" + "' + b + '" + HINT_SUFFIX + " ';" +
+                            "if (a) r += '" + HINT_PREFIX + "after=" + "' + a + '" + HINT_SUFFIX + " ';" +
+                            "return r.trim();",
                     element
             );
-            return normalizeText(safe(String.valueOf(v)));
-        } catch (Exception ignored) {
+            return hint == null ? "" : hint.trim();
+        } catch (RuntimeException e) {
             return "";
         }
     }
 
     private String resolveFormIdentifier(WebElement element) {
         try {
-            WebElement form = element.findElement(By.xpath("ancestor::form[1]"));
-            String id = attr(form, "id");
-            String name = attr(form, "name");
-            if (!id.isBlank()) {
-                return id;
+            WebElement form = (WebElement) js.executeScript(
+                    "return arguments[0].closest('form');",
+                    element
+            );
+            if (form == null) {
+                return "";
             }
-            return name;
-        } catch (Exception ignored) {
+
+            String id = attr(form, "id");
+            if (!id.isBlank()) {
+                return "id:" + id;
+            }
+
+            String name = attr(form, "name");
+            if (!name.isBlank()) {
+                return "name:" + name;
+            }
+
+            String action = attr(form, "action");
+            if (!action.isBlank()) {
+                return "action:" + action;
+            }
+
+            return "form";
+        } catch (RuntimeException e) {
             return "";
         }
     }
 
-    private String normalizeText(String v) {
-        if (v == null) {
+    private String normalizeText(String s) {
+        if (s == null) {
             return "";
         }
-        return v.trim().replaceAll("\\s+", " ");
+        return s.replaceAll("\\s+", " ").trim();
     }
 
-    private String cssEscape(String v) {
-        // minimal escape for attribute value usage in CSS selector inside single quotes
-        if (v == null) {
+    private String cssEscape(String s) {
+        if (s == null || s.isEmpty()) {
             return "";
         }
-        return v.replace("\\", "\\\\").replace("'", "\\'");
+        return s.replace("\\", "\\\\").replace("'", "\\'");
     }
 }

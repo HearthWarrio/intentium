@@ -9,6 +9,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.Consumer;
+import java.util.Arrays;
+import java.util.Collections;
 
 /**
  * DSL for executing a sequence of intent-driven actions.
@@ -45,6 +47,15 @@ public final class ActionsChain {
      * true/false – override for this chain execution
      */
     private Boolean consistencyOverride = null;
+
+    /**
+     * Optional per-chain override for {@link IntentiumWebDriver#withTestAttributeWhitelist(String...)}.
+     * When specified, the chain applies the whitelist override for {@link #perform()} execution and restores
+     * the original driver whitelist afterwards.
+     */
+    private boolean testAttributeWhitelistOverrideSpecified = false;
+
+    private List<String> testAttributeWhitelistOverrideValue = null;
 
     public ActionsChain(IntentiumWebDriver intentium) {
         this.intentium = Objects.requireNonNull(intentium, "intentium must not be null");
@@ -194,6 +205,50 @@ public final class ActionsChain {
     }
 
     /**
+     * Overrides the whitelist of "test/qa" attributes (for example, {@code data-testid}, {@code data-qa}) for this chain
+     * execution.
+     * <p>
+     * The order matters: the first present attribute wins.
+     * <p>
+     * Blank names are ignored, duplicates are removed (keeping the first occurrence).
+     * <p>
+     * Passing an empty whitelist disables test attribute detection for this chain execution.
+     *
+     * @param attributeNames attribute names in priority order
+     * @return this chain instance for fluent chaining
+     */
+    public ActionsChain withTestAttributeWhitelist(String... attributeNames) {
+        Objects.requireNonNull(attributeNames, "attributeNames must not be null");
+
+        this.testAttributeWhitelistOverrideSpecified = true;
+
+        if (attributeNames.length == 0) {
+            this.testAttributeWhitelistOverrideValue = Collections.emptyList();
+            return this;
+        }
+
+        List<String> normalized = new ArrayList<>();
+        for (String raw : attributeNames) {
+            if (raw == null) {
+                continue;
+            }
+            String name = raw.trim();
+            if (name.isEmpty()) {
+                continue;
+            }
+            if (!normalized.contains(name)) {
+                normalized.add(name);
+            }
+        }
+
+        this.testAttributeWhitelistOverrideValue = normalized;
+        return this;
+    }
+
+    /**
+     * Executes all accumulated steps.
+     */
+    /**
      * Executes all accumulated steps.
      */
     public void perform() {
@@ -201,7 +256,7 @@ public final class ActionsChain {
         boolean originalConsistency = intentium.isConsistencyCheckEnabled();
         boolean originalAllowHashedLastResort = intentium.isAllowHashedLastResortEnabled();
 
-        ExecutionContext ctx = ExecutionContext.create(intentium);
+        List<String> originalTestAttributeWhitelist = null;
 
         try {
             if (loggerOverrideSpecified) {
@@ -213,11 +268,26 @@ public final class ActionsChain {
             if (allowHashedLastResortOverride != null) {
                 intentium.withAllowHashedLastResort(allowHashedLastResortOverride);
             }
+            if (testAttributeWhitelistOverrideSpecified) {
+                originalTestAttributeWhitelist = new ArrayList<>(intentium.getTestAttributeWhitelist());
+                List<String> override = testAttributeWhitelistOverrideValue == null
+                        ? Collections.emptyList()
+                        : testAttributeWhitelistOverrideValue;
+                intentium.withTestAttributeWhitelist(override);
+            }
+
+            ExecutionContext ctx = ExecutionContext.create(intentium);
 
             for (Consumer<ExecutionContext> step : steps) {
                 step.accept(ctx);
             }
         } finally {
+            if (testAttributeWhitelistOverrideSpecified) {
+                List<String> restore = originalTestAttributeWhitelist == null
+                        ? Collections.emptyList()
+                        : originalTestAttributeWhitelist;
+                intentium.withTestAttributeWhitelist(restore);
+            }
             if (loggerOverrideSpecified) {
                 intentium.setResolvedElementLogger(originalLogger);
             }
@@ -229,7 +299,6 @@ public final class ActionsChain {
             }
         }
     }
-
 
     /**
      * Convenience: add click for current target and execute chain immediately.
