@@ -11,11 +11,16 @@ import java.util.*;
 /**
  * High-level Intentium entry point for Selenium WebDriver.
  * <p>
- * Intentium can treat project-specific "test/qa attributes" (for example, {@code data-testid}, {@code data-qa})
- * as a strong semantic signal during DOM snapshotting. Use {withTestAttributeWhitelist(String...)} to
- * configure the whitelist or disable it.
+ * Intentium provides two execution modes:
+ * <ul>
+ *   <li>Direct API (e.g. {@link #click(String)}, {@link #sendKeys(String, CharSequence...)}): each call is treated as an
+ *       independent step. Resolving an intent phrase may collect a fresh DOM candidates snapshot for that call.</li>
+ *   <li>{@link ActionsChain} (via {@link #actionsChain()}): one {@link ActionsChain#perform()} call is treated as one step
+ *       and reuses a single DOM candidates snapshot across all intent phrase resolutions within the chain.</li>
+ * </ul>
  * <p>
- * This class is not thread-safe and is expected to be used from a single test thread.
+ * Snapshot invalidation within a chain is triggered by URL change (navigation). DOM mutations without URL change are outside
+ * the snapshot reuse guarantee.
  */
 public class IntentiumWebDriver {
 
@@ -326,20 +331,58 @@ public class IntentiumWebDriver {
 
     // ----------- main API -----------
 
+    /**
+     * Resolves the given intent phrase to a {@link WebElement}.
+     * <p>
+     * Snapshot contract: this direct call is treated as an independent step and may collect a fresh DOM candidates snapshot.
+     * To reuse a single snapshot across multiple operations within one logical step, use {@link #actionsChain()} and execute
+     * via {@link ActionsChain#perform()}.
+     *
+     * @param intentPhrase intent phrase describing the target element
+     * @return resolved element
+     */
     public WebElement findElement(String intentPhrase) {
         return resolveIntent(intentPhrase, false).element;
     }
 
+    /**
+     * Resolves the given intent phrase and performs {@link WebElement#click()} on the resolved element.
+     * <p>
+     * Snapshot contract: this direct call is treated as an independent step and may collect a fresh DOM candidates snapshot.
+     * To reuse a single snapshot across multiple operations within one logical step, use {@link #actionsChain()} and execute
+     * via {@link ActionsChain#perform()}.
+     *
+     * @param intentPhrase intent phrase describing the target element
+     */
     public void click(String intentPhrase) {
         resolveIntent(intentPhrase, false).element.click();
     }
 
+    /**
+     * Resolves the given intent phrase and performs {@link WebElement#sendKeys(CharSequence...)} on the resolved element.
+     * <p>
+     * Snapshot contract: this direct call is treated as an independent step and may collect a fresh DOM candidates snapshot.
+     * To reuse a single snapshot across multiple operations within one logical step, use {@link #actionsChain()} and execute
+     * via {@link ActionsChain#perform()}.
+     *
+     * @param intentPhrase intent phrase describing the target element
+     * @param keys keys to send
+     */
     public void sendKeys(String intentPhrase, CharSequence... keys) {
         resolveIntent(intentPhrase, false).element.sendKeys(keys);
     }
 
     /**
-     * p.4: uses last-resolve cache to avoid second DOM pass if getCssSelector() follows.
+     * Resolves the intent phrase and returns a best-effort derived XPath for the resolved element.
+     * <p>
+     * Uses a "last resolve" cache to avoid a second full candidates pass when {@link #getCssSelector(String)} is called next
+     * for the same intent phrase.
+     * <p>
+     * Snapshot contract: this direct call is treated as an independent step and may collect a fresh DOM candidates snapshot
+     * unless served from the last resolve cache.
+     *
+     * @param intentPhrase intent phrase describing the target element
+     * @return derived XPath for the resolved element
      */
     public String getXPath(String intentPhrase) {
         ResolvedElement r = resolveIntent(intentPhrase, true);
@@ -347,19 +390,41 @@ public class IntentiumWebDriver {
     }
 
     /**
-     * p.4: uses last-resolve cache to avoid second DOM pass if getXPath() was already called.
+     * Resolves the intent phrase and returns a best-effort derived CSS selector for the resolved element.
+     * <p>
+     * Uses a "last resolve" cache to avoid a second full candidates pass when {@link #getXPath(String)} was called right before
+     * for the same intent phrase.
+     * <p>
+     * Snapshot contract: this direct call is treated as an independent step and may collect a fresh DOM candidates snapshot
+     * unless served from the last resolve cache.
+     *
+     * @param intentPhrase intent phrase describing the target element
+     * @return derived CSS selector for the resolved element
      */
     public String getCssSelector(String intentPhrase) {
         ResolvedElement r = resolveIntent(intentPhrase, true);
         return r.cssSelector;
     }
 
-    /** Starts a single-intent action helper. */
+    /**
+     * Creates a helper for performing multiple operations against the same intent phrase.
+     * <p>
+     * The returned action resolves the intent phrase at most once per instance (best-effort). The first resolution may collect
+     * a DOM candidates snapshot. For multi-intent flows where snapshot reuse matters, prefer {@link #actionsChain()}.
+     *
+     * @param intentPhrase intent phrase describing the target element
+     * @return single-intent action helper
+     */
     public SingleIntentAction into(String intentPhrase) {
         return new SingleIntentAction(this, intentPhrase);
     }
 
-    /** Alias for {@link #into(String)}. */
+    /**
+     * Alias for {@link #into(String)}.
+     *
+     * @param intentPhrase intent phrase describing the target element
+     * @return single-intent action helper
+     */
     public SingleIntentAction at(String intentPhrase) {
         return into(intentPhrase);
     }
@@ -367,76 +432,207 @@ public class IntentiumWebDriver {
 // ----------- PageObject / manual locator bridge -----------
 
     /**
-     * Resolve an element using a manual Selenium {@link By} locator.
+     * Resolves an element using a manual Selenium {@link By} locator.
      * <p>
-     * Useful as a bridge for existing PageObjects: you can keep your locators,
-     * but still use Intentium DSL, logging and optional consistency checks.
+     * This API is intended as a bridge for existing PageObjects: you can keep explicit locators while still using Intentium
+     * logging and optional consistency checks.
+     * <p>
+     * Snapshot contract: this direct call is treated as an independent step and does not participate in
+     * {@link ActionsChain} snapshot reuse.
+     *
+     * @param by Selenium locator
+     * @return resolved element
      */
     public WebElement findElement(By by) {
         return resolveBy(by, false).element;
     }
 
+    /**
+     * Resolves an element using the given {@link By} locator and performs {@link WebElement#click()}.
+     * <p>
+     * Logging and optional consistency checks are applied to the resolved target.
+     * <p>
+     * Snapshot contract: this direct call is treated as an independent step and does not participate in
+     * {@link ActionsChain} snapshot reuse.
+     *
+     * @param by Selenium locator
+     */
     public void click(By by) {
         resolveBy(by, false).element.click();
     }
 
+    /**
+     * Resolves an element using the given {@link By} locator and performs {@link WebElement#sendKeys(CharSequence...)}.
+     * <p>
+     * Logging and optional consistency checks are applied to the resolved target.
+     * <p>
+     * Snapshot contract: this direct call is treated as an independent step and does not participate in
+     * {@link ActionsChain} snapshot reuse.
+     *
+     * @param by Selenium locator
+     * @param keys keys to send
+     */
     public void sendKeys(By by, CharSequence... keys) {
         resolveBy(by, false).element.sendKeys(keys);
     }
 
+    /**
+     * Resolves an element using the given {@link By} locator and returns a best-effort XPath for the target.
+     * <p>
+     * If the provided locator is an XPath locator, the returned value is the original XPath expression. Otherwise the XPath
+     * is derived from the resolved element as a best-effort "quick" locator.
+     *
+     * @param by Selenium locator
+     * @return XPath for the target (manual when possible, otherwise derived)
+     */
     public String getXPath(By by) {
         return resolveBy(by, true).xPath;
     }
 
+    /**
+     * Resolves an element using the given {@link By} locator and returns a best-effort CSS selector for the target.
+     * <p>
+     * If the provided locator is a CSS locator, the returned value is the original CSS selector. Otherwise the selector is
+     * derived from the resolved element as a best-effort "quick" locator.
+     *
+     * @param by Selenium locator
+     * @return CSS selector for the target (manual when possible, otherwise derived)
+     */
     public String getCssSelector(By by) {
         return resolveBy(by, true).cssSelector;
     }
 
+    /**
+     * Creates a helper for performing multiple operations against a single known target specified by {@link By}.
+     * <p>
+     * The helper resolves the target at most once per instance (best-effort) and caches the resolved element and derived
+     * locators when requested.
+     * <p>
+     * Logging and optional consistency checks are applied to the resolved target.
+     *
+     * @param by Selenium locator
+     * @return single-target action helper
+     */
     public SingleTargetAction into(By by) {
         return new SingleTargetAction(this, by);
     }
 
+    /**
+     * Alias for {@link #into(By)}.
+     *
+     * @param by Selenium locator
+     * @return single-target action helper
+     */
     public SingleTargetAction at(By by) {
         return into(by);
     }
 
     /**
-     * Resolve / act on an existing {@link WebElement} reference (e.g. from PageFactory).
+     * Resolves or acts on an existing {@link WebElement} reference (for example, returned from PageFactory).
      * <p>
      * Best-effort behavior:
-     * - If the element is a PageFactory proxy and Intentium can extract the underlying {@link By},
-     *   Intentium will prefer that {@link By} for logging and consistency checks.
-     * - Otherwise Intentium will operate on the provided element and build derived XPath/CSS.
+     * <ul>
+     *   <li>If the element is a PageFactory proxy and Intentium can extract the underlying {@link By}, Intentium prefers that
+     *       {@link By} for logging, derived locators and optional consistency checks.</li>
+     *   <li>Otherwise Intentium operates on the provided element directly and derives "quick" XPath/CSS when needed.</li>
+     * </ul>
+     * <p>
+     * Snapshot contract: this direct call is treated as an independent step and does not participate in
+     * {@link ActionsChain} snapshot reuse.
+     *
+     * @param element existing element reference
+     * @return resolved element (may be the same reference or a resolved target from extracted {@link By})
      */
     public WebElement findElement(WebElement element) {
         return resolveWebElement(element, false).element;
     }
 
+    /**
+     * Performs {@link WebElement#click()} on the provided {@link WebElement}.
+     * <p>
+     * If the element is a PageFactory proxy and Intentium can extract an underlying {@link By}, Intentium prefers resolving
+     * via that {@link By} for logging and optional consistency checks.
+     *
+     * @param element existing element reference
+     */
     public void click(WebElement element) {
         resolveWebElement(element, false).element.click();
     }
 
+    /**
+     * Performs {@link WebElement#sendKeys(CharSequence...)} on the provided {@link WebElement}.
+     * <p>
+     * If the element is a PageFactory proxy and Intentium can extract an underlying {@link By}, Intentium prefers resolving
+     * via that {@link By} for logging and optional consistency checks.
+     *
+     * @param element existing element reference
+     * @param keys keys to send
+     */
     public void sendKeys(WebElement element, CharSequence... keys) {
         resolveWebElement(element, false).element.sendKeys(keys);
     }
 
+    /**
+     * Returns a best-effort XPath for the provided {@link WebElement}.
+     * <p>
+     * If the element is a PageFactory proxy and Intentium can extract an underlying {@link By} of XPath kind, the returned
+     * value is the extracted XPath expression. Otherwise the XPath is derived from the element as a best-effort "quick"
+     * locator.
+     *
+     * @param element existing element reference
+     * @return XPath for the target (manual when possible, otherwise derived)
+     */
     public String getXPath(WebElement element) {
         return resolveWebElement(element, true).xPath;
     }
 
+    /**
+     * Returns a best-effort CSS selector for the provided {@link WebElement}.
+     * <p>
+     * If the element is a PageFactory proxy and Intentium can extract an underlying {@link By} of CSS kind, the returned
+     * value is the extracted CSS selector. Otherwise the selector is derived from the element as a best-effort "quick"
+     * locator.
+     *
+     * @param element existing element reference
+     * @return CSS selector for the target (manual when possible, otherwise derived)
+     */
     public String getCssSelector(WebElement element) {
         return resolveWebElement(element, true).cssSelector;
     }
 
+    /**
+     * Creates a helper for performing multiple operations against a single known target specified by {@link WebElement}.
+     * <p>
+     * The helper resolves the target at most once per instance (best-effort). If the element is a PageFactory proxy and
+     * Intentium can extract an underlying {@link By}, the helper prefers resolving via that {@link By}.
+     * <p>
+     * Logging and optional consistency checks are applied to the resolved target.
+     *
+     * @param element existing element reference
+     * @return single-target action helper
+     */
     public SingleTargetAction into(WebElement element) {
         return new SingleTargetAction(this, element);
     }
 
+    /**
+     * Alias for {@link #into(WebElement)}.
+     *
+     * @param element existing element reference
+     * @return single-target action helper
+     */
     public SingleTargetAction at(WebElement element) {
         return into(element);
     }
 
-    /** Starts an action chain DSL. */
+    /**
+     * Creates an {@link ActionsChain} that executes a sequence of operations as a single logical step.
+     * <p>
+     * Within one {@link ActionsChain#perform()} call, Intentium reuses a single DOM candidates snapshot for all intent phrase
+     * resolutions. Snapshot invalidation is triggered by URL change (navigation).
+     *
+     * @return new actions chain instance bound to this driver
+     */
     public ActionsChain actionsChain() {
         return new ActionsChain(this);
     }
