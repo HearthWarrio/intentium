@@ -13,16 +13,28 @@ import java.util.Arrays;
 import java.util.Collections;
 
 /**
- * DSL for executing a sequence of intent-driven actions.
+ * DSL for executing a sequence of intent-driven actions within a single logical step.
  * <p>
- * Supports optional overrides for logging and consistency checks at chain level.
- * <p>
- * Per-chain caching:
+ * Step boundary (current contract):
  * <ul>
- *   <li>DOM candidates are collected once per {@link #perform()}</li>
- *   <li>each target (intent phrase / By / WebElement) is resolved once per perform(), per "need locators" flag</li>
+ *   <li>One {@link #perform()} call is treated as one logical step.</li>
+ *   <li>Within a single {@code perform()}, Intentium collects the DOM candidates snapshot once and reuses it for all
+ *       intent phrase resolutions.</li>
+ * </ul>
+ * <p>
+ * Snapshot invalidation:
+ * <ul>
+ *   <li>The snapshot is refreshed when the current URL changes (navigation).</li>
+ *   <li>DOM mutations without navigation are outside the snapshot reuse guarantee. If your chain performs a DOM-mutating
+ *       action and then resolves new intents, split the flow into multiple {@code perform()} calls.</li>
+ * </ul>
+ * <p>
+ * Stale element handling:
+ * <ul>
+ *   <li>No automatic stale recovery is attempted.</li>
  * </ul>
  */
+
 public final class ActionsChain {
 
     private final IntentiumWebDriver intentium;
@@ -246,10 +258,17 @@ public final class ActionsChain {
     }
 
     /**
-     * Executes all accumulated steps.
-     */
-    /**
-     * Executes all accumulated steps.
+     * Executes all accumulated steps as a single logical step.
+     * <p>
+     * Caching within this execution:
+     * <ul>
+     *   <li>DOM candidates snapshot is collected once and reused for all intent phrase resolutions.</li>
+     *   <li>Per-target resolution is cached (intent phrase / By / WebElement) and reused within this execution.</li>
+     * </ul>
+     * <p>
+     * Snapshot is refreshed on navigation (URL change). DOM mutations without URL change are outside the snapshot reuse
+     * guarantee and may lead to stale element references; split into multiple {@code perform()} calls around DOM-mutating
+     * actions when needed.
      */
     public void perform() {
         ResolvedElementLogger originalLogger = intentium.getResolvedElementLogger();
