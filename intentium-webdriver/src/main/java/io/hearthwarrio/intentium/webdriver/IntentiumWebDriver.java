@@ -1388,8 +1388,8 @@ public class IntentiumWebDriver {
     }
 
     private String resolveFormKey(DomElementInfo info, FormContext form) {
-        String fromInfo = safe(info == null ? null : info.getFormIdentifier());
-        if (!fromInfo.isBlank()) {
+        String fromInfo = safe(info == null ? null : info.getFormIdentifier()).trim();
+        if (fromInfo.startsWith("id:") || fromInfo.startsWith("name:")) {
             return fromInfo;
         }
 
@@ -1410,18 +1410,42 @@ public class IntentiumWebDriver {
         return "";
     }
 
+    /**
+     * Prefixes the provided XPath with the closest enclosing {@code form} (by {@code id} or {@code name}) when available.
+     * <p>
+     * Supports both plain expressions starting with {@code //} and grouped expressions like {@code (//tag)[n]}.
+     *
+     * @param form resolved enclosing form context
+     * @param xPath XPath expression to prefix
+     * @return form-scoped XPath when possible; otherwise the original XPath
+     */
     private String xPathWithFormPrefix(FormContext form, String xPath) {
         if (form == null || form == FormContext.NONE) {
             return xPath;
         }
+
+        String prefix;
         if (!form.id.isBlank()) {
-            return "//form[@id=" + xpathLiteral(form.id) + "]" + ensureStartsWithDoubleSlash(xPath);
+            prefix = "//form[@id=" + xpathLiteral(form.id) + "]";
+        } else if (!form.name.isBlank()) {
+            prefix = "//form[@name=" + xpathLiteral(form.name) + "]";
+        } else {
+            return xPath;
         }
-        if (!form.name.isBlank()) {
-            return "//form[@name=" + xpathLiteral(form.name) + "]" + ensureStartsWithDoubleSlash(xPath);
+
+        if (xPath == null || xPath.isBlank()) {
+            return prefix;
         }
-        return xPath;
+
+        String t = xPath.trim();
+
+        if (t.startsWith("(//")) {
+            return "(" + prefix + t.substring(1);
+        }
+
+        return prefix + ensureStartsWithDoubleSlash(t);
     }
+
 
     private String cssWithFormPrefix(FormContext form, String css) {
         if (form == null || form == FormContext.NONE) {
