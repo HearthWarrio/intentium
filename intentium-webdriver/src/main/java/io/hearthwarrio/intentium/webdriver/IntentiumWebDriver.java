@@ -1392,15 +1392,21 @@ public class IntentiumWebDriver {
         if (!fromInfo.isBlank()) {
             return fromInfo;
         }
-        if (form == null || form == FormContext.NONE) {
+
+        if (form == null) {
             return "";
         }
-        if (!form.id.isBlank()) {
-            return "id:" + form.id;
+
+        String id = safe(form.id);
+        if (!id.isBlank()) {
+            return "id:" + id;
         }
-        if (!form.name.isBlank()) {
-            return "name:" + form.name;
+
+        String name = safe(form.name);
+        if (!name.isBlank()) {
+            return "name:" + name;
         }
+
         return "";
     }
 
