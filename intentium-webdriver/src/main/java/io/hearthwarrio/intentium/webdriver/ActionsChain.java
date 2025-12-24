@@ -1,4 +1,5 @@
 package io.hearthwarrio.intentium.webdriver;
+import io.hearthwarrio.intentium.core.ElementHeuristic;
 
 import org.openqa.selenium.By;
 import org.openqa.selenium.WebElement;
@@ -52,6 +53,13 @@ public final class ActionsChain {
      * the original driver value afterwards.
      */
     private Boolean allowHashedLastResortOverride;
+
+    /**
+     * Optional per-chain override for {@link IntentiumWebDriver#withElementHeuristics(List)}.
+     * When set, the chain applies the override for {@link #perform()} execution and restores
+     * the original driver value afterwards.
+     */
+    private List<ElementHeuristic> elementHeuristicsOverride = null;
 
     /**
      * Tri-state:
@@ -221,6 +229,34 @@ public final class ActionsChain {
     }
 
     /**
+     * Overrides element heuristics for this chain execution.
+     * <p>
+     * The override is applied only for the duration of {@link #perform()} and then reverted.
+     *
+     * @param heuristics heuristics to use for this chain execution (null clears override and keeps driver value)
+     * @return this chain instance for fluent chaining
+     */
+    public ActionsChain withElementHeuristics(List<ElementHeuristic> heuristics) {
+        this.elementHeuristicsOverride = heuristics;
+        return this;
+    }
+
+    /**
+     * Convenience overload for {@link #withElementHeuristics(List)}.
+     *
+     * @param heuristics heuristics to use for this chain execution (may be null)
+     * @return this chain instance for fluent chaining
+     */
+    public ActionsChain withElementHeuristics(ElementHeuristic... heuristics) {
+        if (heuristics == null) {
+            this.elementHeuristicsOverride = null;
+            return this;
+        }
+        this.elementHeuristicsOverride = Arrays.asList(heuristics);
+        return this;
+    }
+
+    /**
      * Overrides the whitelist of "test/qa" attributes (for example, {@code data-testid}, {@code data-qa}) for this chain
      * execution.
      * <p>
@@ -279,6 +315,8 @@ public final class ActionsChain {
         boolean originalConsistency = intentium.isConsistencyCheckEnabled();
         boolean originalAllowHashedLastResort = intentium.isAllowHashedLastResortEnabled();
 
+        List<ElementHeuristic> originalElementHeuristics = intentium.getElementHeuristics();
+
         List<String> originalTestAttributeWhitelist = null;
 
         try {
@@ -290,6 +328,9 @@ public final class ActionsChain {
             }
             if (allowHashedLastResortOverride != null) {
                 intentium.withAllowHashedLastResort(allowHashedLastResortOverride);
+            }
+            if (elementHeuristicsOverride != null) {
+                intentium.withElementHeuristics(elementHeuristicsOverride);
             }
             if (testAttributeWhitelistOverrideSpecified) {
                 originalTestAttributeWhitelist = new ArrayList<>(intentium.getTestAttributeWhitelist());
@@ -319,6 +360,9 @@ public final class ActionsChain {
             }
             if (allowHashedLastResortOverride != null) {
                 intentium.withAllowHashedLastResort(originalAllowHashedLastResort);
+            }
+            if (elementHeuristicsOverride != null) {
+                intentium.withElementHeuristics(originalElementHeuristics);
             }
         }
     }

@@ -6,10 +6,7 @@ import org.openqa.selenium.JavascriptExecutor;
 import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.WebElement;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Objects;
+import java.util.*;
 
 /**
  * Maps Selenium {@link WebElement} to {@link DomElementInfo} snapshots.
@@ -29,7 +26,7 @@ public class WebDriverDomMapper {
      * This list is immutable. If you need a custom set, pass your own list via
      * {@link #WebDriverDomMapper(WebDriver, List)}.
      */
-    public static final List<String> DEFAULT_TEST_ATTRIBUTE_WHITELIST = List.of(
+    public static final List<String> DEFAULT_TEST_ATTRIBUTE_WHITELIST = Collections.unmodifiableList(Arrays.asList(
             "data-testid",
             "data-test-id",
             "data-test",
@@ -37,7 +34,7 @@ public class WebDriverDomMapper {
             "data-cy",
             "data-automation-id",
             "data-automation"
-    );
+    ));
 
     private static final class TestAttribute {
         final String name;
@@ -247,30 +244,70 @@ public class WebDriverDomMapper {
 
     private String resolveSurroundingText(WebElement element) {
         try {
-            String hint = (String) js.executeScript(
-                    "var el = arguments[0];" +
-                            "function textOf(n){ return (n && n.textContent) ? n.textContent.trim() : ''; }" +
-                            "var before = '';" +
-                            "var after = '';" +
-                            "if (el && el.parentElement) {" +
-                            "  var p = el.parentElement;" +
-                            "  var kids = Array.prototype.slice.call(p.childNodes || []);" +
-                            "  var idx = kids.indexOf(el);" +
-                            "  if (idx > 0) before = textOf(kids[idx-1]);" +
-                            "  if (idx >= 0 && idx < kids.length-1) after = textOf(kids[idx+1]);" +
-                            "}" +
-                            "var b = before.replace(/\\s+/g,' ').trim();" +
-                            "var a = after.replace(/\\s+/g,' ').trim();" +
-                            "var r = '';" +
-                            "if (b) r += '" + HINT_PREFIX + "before=" + "' + b + '" + HINT_SUFFIX + " ';" +
-                            "if (a) r += '" + HINT_PREFIX + "after=" + "' + a + '" + HINT_SUFFIX + " ';" +
-                            "return r.trim();",
+            Object v = js.executeScript(
+                    "var el=arguments[0];" +
+                            "function txt(n){return (n && n.innerText) ? n.innerText : '';} " +
+                            "return (txt(el.parentElement) || '') + ' ' + (txt(el.previousElementSibling) || '') + ' ' + (txt(el.nextElementSibling) || '');",
                     element
             );
-            return hint == null ? "" : hint.trim();
-        } catch (RuntimeException e) {
+
+            String base = normalizeText(safe(String.valueOf(v)));
+            return appendHints(base, element);
+        } catch (Exception ignored) {
             return "";
         }
+    }
+
+    /**
+     * Appends structured hints to the surrounding text in a stable, machine-readable form.
+     * <p>
+     * Hints are used by selectors and heuristics to recognize "weird" elements (ARIA roles, contenteditable, etc.)
+     * even when the tag name or input type is not sufficiently descriptive.
+     *
+     * @param surrounding normalized surrounding text
+     * @param element     element to extract hints from
+     * @return surrounding text with appended hints
+     */
+    private String appendHints(String surrounding, WebElement element) {
+        String hints = buildHints(element);
+        if (hints.isBlank()) {
+            return surrounding;
+        }
+        if (surrounding == null || surrounding.isBlank()) {
+            return hints;
+        }
+        return surrounding + " " + hints;
+    }
+
+    private String buildHints(WebElement element) {
+        StringBuilder sb = new StringBuilder();
+
+        String role = attr(element, "role");
+        if (!role.isBlank()) {
+            sb.append(HINT_PREFIX).append("role=").append(role.trim().toLowerCase(Locale.ROOT)).append(HINT_SUFFIX);
+        }
+
+        String contentEditable = attr(element, "contenteditable");
+        if (!contentEditable.isBlank() && !"false".equalsIgnoreCase(contentEditable.trim())) {
+            sb.append(HINT_PREFIX).append("contenteditable=true").append(HINT_SUFFIX);
+        }
+
+        String ariaHasPopup = attr(element, "aria-haspopup");
+        if (!ariaHasPopup.isBlank()) {
+            sb.append(HINT_PREFIX).append("aria-haspopup=").append(ariaHasPopup.trim().toLowerCase(Locale.ROOT)).append(HINT_SUFFIX);
+        }
+
+        String ariaExpanded = attr(element, "aria-expanded");
+        if (!ariaExpanded.isBlank()) {
+            sb.append(HINT_PREFIX).append("aria-expanded=").append(ariaExpanded.trim().toLowerCase(Locale.ROOT)).append(HINT_SUFFIX);
+        }
+
+        String ariaControls = attr(element, "aria-controls");
+        if (!ariaControls.isBlank()) {
+            sb.append(HINT_PREFIX).append("aria-controls=").append(ariaControls.trim()).append(HINT_SUFFIX);
+        }
+
+        return sb.toString();
     }
 
     private String resolveFormIdentifier(WebElement element) {
