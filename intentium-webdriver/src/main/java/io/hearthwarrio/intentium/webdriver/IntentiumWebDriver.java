@@ -123,11 +123,48 @@ public class IntentiumWebDriver {
     private final LastLocatorsCache lastLocatorsCache = new LastLocatorsCache();
 
     public IntentiumWebDriver(WebDriver driver, Language language) {
-        this(driver, language, new DefaultIntentResolver(), new DefaultElementSelector(), null);
+        this(driver, language, new DefaultIntentResolver(), new ExtensibleElementSelector(), null);
     }
 
     public IntentiumWebDriver(WebDriver driver, Language language, ResolvedElementLogger logger) {
-        this(driver, language, new DefaultIntentResolver(), new DefaultElementSelector(), logger);
+        this(driver, language, new DefaultIntentResolver(), new ExtensibleElementSelector(), logger);
+    }
+
+    /**
+     * Creates a driver facade using default resolver and an extensible selector configured with the provided heuristics.
+     * <p>
+     * This constructor enables project-specific selection rules without rewriting the whole selector.
+     *
+     * @param driver Selenium WebDriver
+     * @param language language configuration
+     * @param heuristics selection heuristics (optional)
+     */
+    public IntentiumWebDriver(WebDriver driver, Language language, ElementHeuristic... heuristics) {
+        this(driver, language, new DefaultIntentResolver(),
+                new ExtensibleElementSelector(
+                        new DefaultElementScorer(),
+                        heuristics == null ? Collections.<ElementHeuristic>emptyList() : Arrays.asList(heuristics)),
+                null
+        );
+    }
+
+    /**
+     * Creates a driver facade using default resolver and an extensible selector configured with the provided heuristics.
+     * <p>
+     * This constructor enables project-specific selection rules without rewriting the whole selector.
+     *
+     * @param driver Selenium WebDriver
+     * @param language language configuration
+     * @param logger resolved element logger (optional)
+     * @param heuristics selection heuristics (optional)
+     */
+    public IntentiumWebDriver(WebDriver driver, Language language, ResolvedElementLogger logger, ElementHeuristic... heuristics) {
+        this(driver, language, new DefaultIntentResolver(),
+                new ExtensibleElementSelector(
+                        new DefaultElementScorer(),
+                        heuristics == null ? Collections.<ElementHeuristic>emptyList() : Arrays.asList(heuristics)),
+                logger
+        );
     }
 
     public IntentiumWebDriver(
@@ -252,6 +289,69 @@ public class IntentiumWebDriver {
      */
     boolean isAllowHashedLastResortEnabled() {
         return allowHashedLastResort;
+    }
+
+    /**
+     * Replaces the configured element heuristics for the current selector, if supported.
+     * <p>
+     * If the configured {@link ElementSelector} does not support heuristics, this method fails fast
+     * to avoid a misleading no-op.
+     *
+     * @param heuristics heuristics list (may be null/empty)
+     * @return this driver instance for fluent chaining
+     * @throws IllegalStateException if the configured {@link ElementSelector} does not support heuristics
+     */
+    public IntentiumWebDriver withElementHeuristics(List<? extends ElementHeuristic> heuristics) {
+        List<? extends ElementHeuristic> safe = heuristics == null ? Collections.emptyList() : heuristics;
+
+        if (this.elementSelector instanceof HeuristicAwareSelector) {
+            HeuristicAwareSelector heuristicAware = (HeuristicAwareSelector) this.elementSelector;
+            heuristicAware.withHeuristics(safe);
+            return this;
+        }
+
+        throw new IllegalStateException(
+                "ElementSelector does not support heuristics: " + this.elementSelector.getClass().getName()
+        );
+    }
+
+
+    /**
+     * Convenience overload for {@link #withElementHeuristics(List)}.
+     *
+     * @param heuristics heuristics to configure (may be null)
+     * @return this driver instance for fluent chaining
+     */
+    public IntentiumWebDriver withElementHeuristics(ElementHeuristic... heuristics) {
+        if (heuristics == null) {
+            return withElementHeuristics(Collections.emptyList());
+        }
+        return withElementHeuristics(Arrays.asList(heuristics));
+    }
+
+    /**
+     * Clears all configured heuristics.
+     *
+     * @return this driver instance for fluent chaining
+     */
+    public IntentiumWebDriver clearElementHeuristics() {
+        return withElementHeuristics(Collections.emptyList());
+    }
+
+    /**
+     * Returns the currently configured heuristics for the current selector.
+     * <p>
+     * If the selector does not support heuristics, returns an empty list.
+     *
+     * @return ordered heuristics list, or an empty list if none configured
+     */
+    public List<ElementHeuristic> getElementHeuristics() {
+        if (this.elementSelector instanceof HeuristicAwareSelector) {
+            HeuristicAwareSelector heuristicAware = (HeuristicAwareSelector) this.elementSelector;
+            List<ElementHeuristic> hs = heuristicAware.getHeuristics();
+            return hs == null ? Collections.emptyList() : hs;
+        }
+        return Collections.emptyList();
     }
 
     // ----------- configuration (sugar, minimal set) -----------
@@ -1060,7 +1160,7 @@ public class IntentiumWebDriver {
         String tag = safeTagName(info, element);
 
         FormContext form = resolveFormContext(element);
-        String formKey = safe(form.identifier());
+        String formKey = resolveFormKey(info, form);
 
         String id = safe(info == null ? null : info.getId());
         if (!id.isBlank()) {
@@ -1135,7 +1235,8 @@ public class IntentiumWebDriver {
 
         int ordinal = ordinalInContext(snapshot, info, tag, formKey, type);
         if (ordinal > 0) {
-            return xPathWithFormPrefix(form, "(" + base + ")[" + ordinal + "]");
+            String scopedBase = xPathWithFormPrefix(form, base);
+            return "(" + scopedBase + ")[" + ordinal + "]";
         }
 
         String hashedClassToken = pickUniqueClassToken(snapshot, tag, formKey, cssClasses, allowHashedLastResort);
@@ -1179,7 +1280,7 @@ public class IntentiumWebDriver {
         String tag = safeTagName(info, element);
 
         FormContext form = resolveFormContext(element);
-        String formKey = safe(form.identifier());
+        String formKey = resolveFormKey(info, form);
 
         String id = safe(info == null ? null : info.getId());
         if (!id.isBlank()) {
@@ -1284,6 +1385,23 @@ public class IntentiumWebDriver {
         } catch (Exception e) {
             return FormContext.NONE;
         }
+    }
+
+    private String resolveFormKey(DomElementInfo info, FormContext form) {
+        String fromInfo = safe(info == null ? null : info.getFormIdentifier());
+        if (!fromInfo.isBlank()) {
+            return fromInfo;
+        }
+        if (form == null || form == FormContext.NONE) {
+            return "";
+        }
+        if (!form.id.isBlank()) {
+            return "id:" + form.id;
+        }
+        if (!form.name.isBlank()) {
+            return "name:" + form.name;
+        }
+        return "";
     }
 
     private String xPathWithFormPrefix(FormContext form, String xPath) {
